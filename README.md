@@ -53,4 +53,7 @@ Server runs over stdio.
 - `jira_search_issues(jql="project = TEAM ORDER BY updated DESC", limit=20)`
 - `jira_get_issue(issue_key="TEAM-123")`
 - `jira_add_worklog(issue_key="TEAM-123", minutes=30, comment="e2e", confirm=True)`
+- `jira_add_worklog(issue_key="TEAM-123", minutes=30, comment="e2e", started="2026-03-04T09:30:00.000+0300", confirm=True)`
 - `jira_transition_issue(issue_key="TEAM-123", transition_id="31", confirm=True)`
+
+`started` format for worklog: `YYYY-MM-DDTHH:MM:SS.000+ZZZZ` (for example `+0300`).
