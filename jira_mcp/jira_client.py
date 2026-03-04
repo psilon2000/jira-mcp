@@ -15,8 +15,11 @@ class JiraClient:
         self._settings = settings
         self._session = requests.Session()
         self._session.headers.update({"Accept": "application/json"})
+        self._auth_variants: list[dict[str, Any]] = []
+        self._active_auth_index = 0
         self._setup_retries()
-        self._setup_auth()
+        self._setup_auth_variants()
+        self._apply_auth_variant(0)
 
     def _setup_retries(self) -> None:
         retry = Retry(
@@ -32,30 +35,55 @@ class JiraClient:
         self._session.mount("https://", adapter)
         self._session.mount("http://", adapter)
 
-    def _setup_auth(self) -> None:
+    def _setup_auth_variants(self) -> None:
         mode = self._settings.auth_mode
         cookie = self._settings.cookie
         username = self._settings.username
         password = self._settings.password
         token = self._settings.token
 
+        variants: list[dict[str, Any]] = []
+
         if mode in {"cookie", "auto"} and cookie:
-            self._session.headers["Cookie"] = cookie
-            return
+            variants.append({"name": "cookie", "cookie": cookie})
 
-        if mode in {"basic", "auto"} and username and (password or token):
-            self._session.auth = (username, password or token)
-            return
+        if mode in {"basic", "auto", "cookie"} and username and (password or token):
+            variants.append({"name": "basic", "basic": (username, password or token)})
 
-        if mode in {"bearer", "auto"} and token:
-            self._session.headers["Authorization"] = f"Bearer {token}"
-            return
+        if mode in {"bearer", "auto", "cookie"} and token:
+            variants.append({"name": "bearer", "token": token})
+
+        if not variants:
+            variants.append({"name": "none"})
+
+        self._auth_variants = variants
+
+    def _apply_auth_variant(self, index: int) -> None:
+        self._active_auth_index = max(0, min(index, len(self._auth_variants) - 1))
+        variant = self._auth_variants[self._active_auth_index]
+
+        self._session.auth = None
+        self._session.headers.pop("Cookie", None)
+        self._session.headers.pop("Authorization", None)
+
+        if variant.get("cookie"):
+            self._session.headers["Cookie"] = variant["cookie"]
+        elif variant.get("basic"):
+            self._session.auth = variant["basic"]
+        elif variant.get("token"):
+            self._session.headers["Authorization"] = f"Bearer {variant['token']}"
 
     def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         url = f"{self._settings.rest_root.rstrip('/')}/{path.lstrip('/')}"
         response = self._session.request(method, url, timeout=self._settings.timeout_sec, **kwargs)
         if response.ok:
             return response
+
+        if response.status_code in {401, 403} and self._active_auth_index + 1 < len(self._auth_variants):
+            self._apply_auth_variant(self._active_auth_index + 1)
+            response = self._session.request(method, url, timeout=self._settings.timeout_sec, **kwargs)
+            if response.ok:
+                return response
 
         details = ""
         try:
