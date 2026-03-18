@@ -1,0 +1,40 @@
+from __future__ import annotations
+
+import os
+import unittest
+from unittest.mock import patch
+
+from jira_mcp.config import AUTH_MODE_BASIC_WITH_COOKIES, load_settings
+
+
+class ConfigTests(unittest.TestCase):
+    def test_load_settings_accepts_basic_with_cookies(self) -> None:
+        env = {
+            "JIRA_BASE_URL": "https://jira.example.local",
+            "JIRA_AUTH_MODE": "BasicWithCookies",
+            "JIRA_USERNAME": "bot",
+            "JIRA_PASSWORD": "secret",
+        }
+        with patch("jira_mcp.config.load_dotenv", return_value=False), patch.dict(os.environ, env, clear=True):
+            settings = load_settings()
+        self.assertEqual(settings.auth_mode, AUTH_MODE_BASIC_WITH_COOKIES)
+
+    def test_load_settings_requires_credentials_for_auto(self) -> None:
+        env = {
+            "JIRA_BASE_URL": "https://jira.example.local",
+            "JIRA_AUTH_MODE": "auto",
+        }
+        with patch("jira_mcp.config.load_dotenv", return_value=False), patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "requires at least one auth source"):
+                load_settings()
+
+    def test_load_settings_uses_defaults_for_recovery_paths(self) -> None:
+        env = {
+            "JIRA_BASE_URL": "https://jira.example.local",
+            "JIRA_AUTH_MODE": "cookie",
+            "JIRA_COOKIE": "JSESSIONID=value",
+        }
+        with patch("jira_mcp.config.load_dotenv", return_value=False), patch.dict(os.environ, env, clear=True):
+            settings = load_settings()
+        self.assertTrue(settings.browser_recovery_script_path.endswith("scripts/jira_browser_recover.py"))
+        self.assertTrue(settings.internal_cookie_storage_path.endswith(".state/jira_cookie.json"))

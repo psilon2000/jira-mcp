@@ -28,16 +28,33 @@ cp .env.example .env
 Required env:
 - `JIRA_BASE_URL`
 
-Recommended for MVP:
-- `JIRA_AUTH_MODE=cookie`
+Recommended auth setup:
+- `JIRA_AUTH_MODE=auto`
 - `JIRA_COOKIE=...`
+- `JIRA_USERNAME=...`
+- `JIRA_PASSWORD=...`
 - `JIRA_WRITE_PROJECT_WHITELIST=TEAM`
 - `JIRA_WRITE_ISSUE_WHITELIST=TEAM-123`
 
-Auth fallback options:
-- Basic: `JIRA_AUTH_MODE=basic` + `JIRA_USERNAME` + `JIRA_PASSWORD`
-- Bearer: `JIRA_AUTH_MODE=bearer` + `JIRA_TOKEN`
-- Auto: `JIRA_AUTH_MODE=auto` (cookie -> basic -> bearer by available env)
+Auth modes:
+- `cookie` - sends raw `JIRA_COOKIE` header.
+- `basic` - sends `Authorization: Basic ...`.
+- `basic_with_cookies` - same as `basic`, but reuses Jira session cookies across requests.
+- `bearer` - sends `Authorization: Bearer <JIRA_BEARER_TOKEN>` with legacy fallback to `JIRA_TOKEN` or `JIRA_COOKIE`.
+- `auto` - tries `cookie -> basic_with_cookies -> basic -> bearer` by available env.
+
+Browser recovery env:
+- `JIRA_ENABLE_BROWSER_RECOVERY=false`
+- `JIRA_BROWSER_RECOVERY_SCRIPT_PATH=scripts/jira_browser_recover.py`
+- `JIRA_BROWSER_PROFILE_DIR=jira_browser_profile`
+- `JIRA_INTERNAL_COOKIE_STORAGE_PATH=.state/jira_cookie.json`
+- `JIRA_BROWSER_RECOVERY_COOLDOWN_MINUTES=60`
+
+Browser recovery notes:
+- Recovery runs only after normal auth fallback is exhausted.
+- Recovered cookie is persisted in `.state/jira_cookie.json` by default and becomes the preferred runtime source.
+- If Playwright is not installed, normal auth still works and recovery returns a clear error.
+- To clear stale recovered cookie manually, remove `.state/jira_cookie.json` and restart the server.
 
 ## Run
 
@@ -46,6 +63,12 @@ python -m jira_mcp.server
 ```
 
 Server runs over stdio.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests
+```
 
 ## Tool Examples
 

@@ -4,12 +4,16 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from .auth_state import JiraRuntimeAuthState
 from .config import load_settings
 from .jira_client import JiraClient
+from .recovery import BrowserRecoveryService
 
 
 settings = load_settings()
-client = JiraClient(settings)
+auth_state = JiraRuntimeAuthState(settings)
+recovery_service = BrowserRecoveryService(settings, auth_state)
+client = JiraClient(settings, auth_state, recovery_service)
 mcp = FastMCP("jira-mcp")
 
 
@@ -49,7 +53,12 @@ def jira_auth_status() -> dict[str, Any]:
     try:
         return client.auth_status()
     except Exception as exc:
-        return {"status": "error", "authorized": False, "error": str(exc)}
+        return {
+            "status": "error",
+            "authorized": False,
+            "cookie_source": auth_state.get_active_source(),
+            "error": str(exc),
+        }
 
 
 @mcp.tool()

@@ -1,105 +1,42 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 import requests
+from requests import Response, Session
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .config import Settings
+from .auth_state import JiraRuntimeAuthState
+from .config import (
+    AUTH_MODE_AUTO,
+    AUTH_MODE_BASIC,
+    AUTH_MODE_BASIC_WITH_COOKIES,
+    AUTH_MODE_BEARER,
+    AUTH_MODE_COOKIE,
+    Settings,
+)
+from .recovery import BrowserRecoveryService
+
+
+@dataclass(frozen=True)
+class AuthAttempt:
+    name: str
 
 
 class JiraClient:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        auth_state: JiraRuntimeAuthState,
+        recovery_service: BrowserRecoveryService | None = None,
+    ) -> None:
         self._settings = settings
-        self._session = requests.Session()
-        self._session.headers.update({"Accept": "application/json"})
-        self._auth_variants: list[dict[str, Any]] = []
-        self._active_auth_index = 0
-        self._setup_retries()
-        self._setup_auth_variants()
-        self._apply_auth_variant(0)
-
-    def _setup_retries(self) -> None:
-        retry = Retry(
-            total=4,
-            read=4,
-            connect=4,
-            backoff_factor=1.0,
-            status_forcelist=(429, 500, 502, 503, 504),
-            allowed_methods=("GET", "POST", "PUT", "DELETE"),
-            raise_on_status=False,
-        )
-        adapter = HTTPAdapter(max_retries=retry)
-        self._session.mount("https://", adapter)
-        self._session.mount("http://", adapter)
-
-    def _setup_auth_variants(self) -> None:
-        mode = self._settings.auth_mode
-        cookie = self._settings.cookie
-        username = self._settings.username
-        password = self._settings.password
-        token = self._settings.token
-
-        variants: list[dict[str, Any]] = []
-
-        if mode in {"cookie", "auto"} and cookie:
-            variants.append({"name": "cookie", "cookie": cookie})
-
-        if mode in {"basic", "auto", "cookie"} and username and (password or token):
-            variants.append({"name": "basic", "basic": (username, password or token)})
-
-        if mode in {"bearer", "auto", "cookie"} and token:
-            variants.append({"name": "bearer", "token": token})
-
-        if not variants:
-            variants.append({"name": "none"})
-
-        self._auth_variants = variants
-
-    def _apply_auth_variant(self, index: int) -> None:
-        self._active_auth_index = max(0, min(index, len(self._auth_variants) - 1))
-        variant = self._auth_variants[self._active_auth_index]
-
-        self._session.auth = None
-        self._session.headers.pop("Cookie", None)
-        self._session.headers.pop("Authorization", None)
-
-        if variant.get("cookie"):
-            self._session.headers["Cookie"] = variant["cookie"]
-        elif variant.get("basic"):
-            self._session.auth = variant["basic"]
-        elif variant.get("token"):
-            self._session.headers["Authorization"] = f"Bearer {variant['token']}"
-
-    def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
-        url = f"{self._settings.rest_root.rstrip('/')}/{path.lstrip('/')}"
-        response = self._session.request(method, url, timeout=self._settings.timeout_sec, **kwargs)
-        if response.ok:
-            return response
-
-        if response.status_code in {401, 403} and self._active_auth_index + 1 < len(self._auth_variants):
-            self._apply_auth_variant(self._active_auth_index + 1)
-            response = self._session.request(method, url, timeout=self._settings.timeout_sec, **kwargs)
-            if response.ok:
-                return response
-
-        details = ""
-        try:
-            payload = response.json()
-            messages = payload.get("errorMessages") if isinstance(payload, dict) else None
-            errors = payload.get("errors") if isinstance(payload, dict) else None
-            parts: list[str] = []
-            if isinstance(messages, list):
-                parts.extend(str(x) for x in messages)
-            if isinstance(errors, dict):
-                parts.extend(f"{k}: {v}" for k, v in errors.items())
-            details = "; ".join(parts)
-        except Exception:
-            details = response.text[:500]
-
-        raise RuntimeError(f"Jira request failed: {response.status_code} {method} {path} {details}".strip())
+        self._auth_state = auth_state
+        self._recovery_service = recovery_service
+        self._sessions: dict[str, Session] = {}
 
     def auth_status(self) -> dict[str, Any]:
         response = self._request("GET", "/myself")
@@ -111,6 +48,10 @@ class JiraClient:
                 "displayName": data.get("displayName"),
                 "emailAddress": data.get("emailAddress"),
                 "active": data.get("active"),
+            },
+            "auth": {
+                "mode": self._settings.auth_mode,
+                "cookie_source": self._auth_state.get_active_source(),
             },
         }
 
@@ -196,3 +137,135 @@ class JiraClient:
         response = self._request("POST", f"/issue/{issue_key}/comment", json={"body": comment})
         payload = response.json()
         return {"status": "ok", "issue_key": issue_key, "comment_id": payload.get("id")}
+
+    def _request(self, method: str, path: str, allow_browser_recovery: bool = True, **kwargs: Any) -> Response:
+        url = f"{self._settings.rest_root.rstrip('/')}/{path.lstrip('/')}"
+        attempts = self._build_auth_attempts()
+        if not attempts:
+            raise RuntimeError("Jira auth has no usable credentials")
+
+        tried: list[str] = []
+        for attempt in attempts:
+            tried.append(attempt.name)
+            response = self._send_with_attempt(attempt, method, url, **kwargs)
+            if response.ok:
+                return response
+
+            if self._is_auth_failure(response):
+                if attempt.name == AUTH_MODE_COOKIE and self._auth_state.mark_active_cookie_invalid():
+                    retried = f"{attempt.name}(configured_env)"
+                    tried.append(retried)
+                    fallback_response = self._send_with_attempt(attempt, method, url, **kwargs)
+                    if fallback_response.ok:
+                        return fallback_response
+                    if not self._is_auth_failure(fallback_response):
+                        self._raise_for_response(method, path, fallback_response)
+                continue
+
+            self._raise_for_response(method, path, response)
+
+        if allow_browser_recovery and self._recovery_service is not None:
+            recovery = self._recovery_service.try_recover(f"Jira auth failed after attempts: {' -> '.join(tried)}")
+            if recovery.is_success:
+                self._reset_sessions()
+                return self._request(method, path, allow_browser_recovery=False, **kwargs)
+            raise RuntimeError(
+                f"Jira auth failed after attempts: {' -> '.join(tried)}; recovery={recovery.details}"
+            )
+
+        raise RuntimeError(f"Jira auth failed after attempts: {' -> '.join(tried)}")
+
+    def _build_auth_attempts(self) -> list[AuthAttempt]:
+        auth_mode = self._settings.auth_mode
+        if auth_mode != AUTH_MODE_AUTO:
+            return [AuthAttempt(auth_mode)] if self._has_credentials_for(auth_mode, auto_mode=False) else []
+
+        attempts: list[AuthAttempt] = []
+        for mode in (AUTH_MODE_COOKIE, AUTH_MODE_BASIC_WITH_COOKIES, AUTH_MODE_BASIC, AUTH_MODE_BEARER):
+            if self._has_credentials_for(mode, auto_mode=True):
+                attempts.append(AuthAttempt(mode))
+        return attempts
+
+    def _has_credentials_for(self, auth_mode: str, auto_mode: bool) -> bool:
+        if auth_mode == AUTH_MODE_COOKIE:
+            return bool(self._auth_state.get_cookie())
+        if auth_mode in {AUTH_MODE_BASIC, AUTH_MODE_BASIC_WITH_COOKIES}:
+            return bool(self._settings.username and self._settings.password)
+        if auth_mode == AUTH_MODE_BEARER:
+            return bool(self._resolve_bearer_token(allow_legacy_cookie_fallback=not auto_mode))
+        return False
+
+    def _resolve_bearer_token(self, allow_legacy_cookie_fallback: bool) -> str | None:
+        if self._settings.token:
+            return self._settings.token
+        if allow_legacy_cookie_fallback:
+            return self._auth_state.get_cookie()
+        return None
+
+    def _send_with_attempt(self, attempt: AuthAttempt, method: str, url: str, **kwargs: Any) -> Response:
+        session = self._get_or_create_session(attempt.name)
+        if attempt.name == AUTH_MODE_COOKIE:
+            cookie = self._auth_state.get_cookie()
+            session.headers.pop("Cookie", None)
+            if cookie:
+                session.headers["Cookie"] = cookie
+        elif attempt.name == AUTH_MODE_BEARER:
+            session.headers.pop("Authorization", None)
+            token = self._resolve_bearer_token(allow_legacy_cookie_fallback=True)
+            if token:
+                session.headers["Authorization"] = f"Bearer {token}"
+
+        return session.request(method, url, timeout=self._settings.timeout_sec, **kwargs)
+
+    def _get_or_create_session(self, attempt_name: str) -> Session:
+        session = self._sessions.get(attempt_name)
+        if session is not None:
+            return session
+
+        session = requests.Session()
+        session.headers.update({"Accept": "application/json"})
+        retry = Retry(
+            total=4,
+            read=4,
+            connect=4,
+            backoff_factor=1.0,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=("GET", "POST", "PUT", "DELETE"),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+
+        if attempt_name in {AUTH_MODE_BASIC, AUTH_MODE_BASIC_WITH_COOKIES}:
+            session.auth = (self._settings.username or "", self._settings.password or "")
+        elif attempt_name == AUTH_MODE_COOKIE:
+            session.cookies.clear()
+        self._sessions[attempt_name] = session
+        return session
+
+    def _reset_sessions(self) -> None:
+        for session in self._sessions.values():
+            session.close()
+        self._sessions.clear()
+
+    @staticmethod
+    def _is_auth_failure(response: Response) -> bool:
+        return response.status_code in {401, 403}
+
+    @staticmethod
+    def _raise_for_response(method: str, path: str, response: Response) -> None:
+        details = ""
+        try:
+            payload = response.json()
+            messages = payload.get("errorMessages") if isinstance(payload, dict) else None
+            errors = payload.get("errors") if isinstance(payload, dict) else None
+            parts: list[str] = []
+            if isinstance(messages, list):
+                parts.extend(str(item) for item in messages)
+            if isinstance(errors, dict):
+                parts.extend(f"{key}: {value}" for key, value in errors.items())
+            details = "; ".join(parts)
+        except Exception:
+            details = response.text[:500]
+        raise RuntimeError(f"Jira request failed: {response.status_code} {method} {path} {details}".strip())
