@@ -38,3 +38,39 @@ class ConfigTests(unittest.TestCase):
             settings = load_settings()
         self.assertTrue(settings.browser_recovery_script_path.endswith("scripts/jira_browser_recover.py"))
         self.assertTrue(settings.internal_cookie_storage_path.endswith(".state/jira_cookie.json"))
+
+    def test_load_settings_requires_create_project_when_enabled(self) -> None:
+        env = {
+            "JIRA_BASE_URL": "https://jira.example.local",
+            "JIRA_AUTH_MODE": "cookie",
+            "JIRA_COOKIE": "JSESSIONID=value",
+            "JIRA_ENABLE_CREATE_ISSUE": "true",
+        }
+        with patch("jira_mcp.config.load_dotenv", return_value=False), patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "JIRA_CREATE_ISSUE_PROJECT_WHITELIST is required"):
+                load_settings()
+
+    def test_load_settings_normalizes_create_project_whitelist(self) -> None:
+        env = {
+            "JIRA_BASE_URL": "https://jira.example.local",
+            "JIRA_AUTH_MODE": "cookie",
+            "JIRA_COOKIE": "JSESSIONID=value",
+            "JIRA_ENABLE_CREATE_ISSUE": "true",
+            "JIRA_CREATE_ISSUE_PROJECT_WHITELIST": " team, aq ",
+        }
+        with patch("jira_mcp.config.load_dotenv", return_value=False), patch.dict(os.environ, env, clear=True):
+            settings = load_settings()
+        self.assertTrue(settings.enable_create_issue)
+        self.assertEqual(settings.create_issue_project_whitelist, ("TEAM", "AQ"))
+
+    def test_load_settings_supports_legacy_create_project_env(self) -> None:
+        env = {
+            "JIRA_BASE_URL": "https://jira.example.local",
+            "JIRA_AUTH_MODE": "cookie",
+            "JIRA_COOKIE": "JSESSIONID=value",
+            "JIRA_ENABLE_CREATE_ISSUE": "true",
+            "JIRA_CREATE_ISSUE_PROJECT": " team ",
+        }
+        with patch("jira_mcp.config.load_dotenv", return_value=False), patch.dict(os.environ, env, clear=True):
+            settings = load_settings()
+        self.assertEqual(settings.create_issue_project_whitelist, ("TEAM",))

@@ -47,6 +47,24 @@ def _ensure_write_allowed(issue_key: str, confirm: bool) -> None:
     raise ValueError(f"issue '{issue}' is not allowed by write whitelist")
 
 
+def _ensure_create_issue_allowed(project_key: str, confirm: bool) -> str:
+    if not confirm:
+        raise ValueError("create requires explicit confirm=true")
+    if not settings.enable_create_issue:
+        raise ValueError("create issue is disabled: set JIRA_ENABLE_CREATE_ISSUE=true")
+    if not settings.create_issue_project_whitelist:
+        raise ValueError(
+            "create issue project whitelist is not configured: set JIRA_CREATE_ISSUE_PROJECT_WHITELIST"
+        )
+
+    project = (project_key or "").strip().upper()
+    if not project:
+        raise ValueError("project_key is required")
+    if project not in settings.create_issue_project_whitelist:
+        raise ValueError(f"project '{project}' is not allowed for issue creation")
+    return project
+
+
 @mcp.tool()
 def jira_auth_status() -> dict[str, Any]:
     """Check Jira auth using /myself endpoint."""
@@ -109,6 +127,34 @@ def jira_update_issue(issue_key: str, fields: dict[str, Any], confirm: bool = Fa
     if not fields:
         raise ValueError("fields must not be empty")
     return client.update_issue(issue_key=issue_key.strip(), fields=fields)
+
+
+@mcp.tool()
+def jira_create_issue(
+    project_key: str,
+    summary: str,
+    issue_type: str = "Task",
+    description: str | None = None,
+    fields: dict[str, Any] | None = None,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Create a Jira issue (confirm + feature flag + project restriction required)."""
+    project = _ensure_create_issue_allowed(project_key, confirm)
+    summary_value = summary.strip()
+    if not summary_value:
+        raise ValueError("summary is required")
+
+    issue_type_value = issue_type.strip()
+    if not issue_type_value:
+        raise ValueError("issue_type is required")
+
+    return client.create_issue(
+        project_key=project,
+        summary=summary_value,
+        issue_type=issue_type_value,
+        description=description,
+        fields=fields,
+    )
 
 
 @mcp.tool()

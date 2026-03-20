@@ -22,6 +22,7 @@ class JiraTestServer(ThreadingHTTPServer):
         self.scenario = scenario
         self.basic_header = "Basic " + base64.b64encode(b"bot:secret").decode()
         self.last_cookie_header: str | None = None
+        self.last_json_body: dict | None = None
         super().__init__(("127.0.0.1", 0), JiraHandler)
 
 
@@ -42,6 +43,24 @@ class JiraHandler(BaseHTTPRequestHandler):
             if self.jira_server.scenario == "basic_with_cookies" and cookie == "JSESSIONID=session-cookie":
                 return self._json(200, {"transitions": [{"id": "1", "name": "Done"}]})
             return self._json(403, {"errorMessages": ["forbidden"]})
+        return self._json(404, {"errorMessages": ["not found"]})
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length) if content_length else b""
+        self.jira_server.last_json_body = json.loads(raw_body.decode() or "{}")
+
+        if path.endswith("/issue") and self.jira_server.scenario == "create_issue":
+            return self._json(
+                201,
+                {
+                    "id": "10001",
+                    "key": "TEAM-42",
+                    "self": "https://jira.example.local/rest/api/2/issue/10001",
+                },
+            )
+
         return self._json(404, {"errorMessages": ["not found"]})
 
     def log_message(self, format: str, *args: object) -> None:
@@ -114,6 +133,8 @@ def make_settings(base_url: str, storage_path: str, **overrides: object) -> Sett
         "default_limit": 20,
         "write_project_whitelist": (),
         "write_issue_whitelist": (),
+        "enable_create_issue": False,
+        "create_issue_project_whitelist": (),
         "enable_browser_recovery": False,
         "browser_recovery_script_path": str(Path(storage_path).with_name("helper.py")),
         "browser_profile_dir": str(Path(storage_path).with_name("profile")),
@@ -201,3 +222,67 @@ class JiraClientTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "recovery="):
                 client.auth_status()
+
+    def test_create_issue_posts_expected_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("create_issue") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            result = client.create_issue(
+                project_key="TEAM",
+                summary="Ship create tool",
+                issue_type="Task",
+                description="Add Jira create issue tool",
+                fields={"priority": {"name": "High"}},
+            )
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["issue_key"], "TEAM-42")
+            self.assertEqual(
+                server.last_json_body,
+                {
+                    "fields": {
+                        "priority": {"name": "High"},
+                        "project": {"key": "TEAM"},
+                        "issuetype": {"name": "Task"},
+                        "summary": "Ship create tool",
+                        "description": "Add Jira create issue tool",
+                    }
+                },
+            )
+
+    def test_create_issue_accepts_issue_type_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("create_issue") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            client.create_issue(
+                project_key="AQ",
+                summary="Ship create tool",
+                issue_type="10006",
+                description=None,
+                fields=None,
+            )
+
+            self.assertEqual(
+                server.last_json_body,
+                {
+                    "fields": {
+                        "project": {"key": "AQ"},
+                        "issuetype": {"id": "10006"},
+                        "summary": "Ship create tool",
+                    }
+                },
+            )

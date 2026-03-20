@@ -26,6 +26,8 @@ def make_settings(storage_path: str, cookie: str | None = "JSESSIONID=configured
         default_limit=20,
         write_project_whitelist=(),
         write_issue_whitelist=(),
+        enable_create_issue=False,
+        create_issue_project_whitelist=(),
         enable_browser_recovery=False,
         browser_recovery_script_path="/tmp/helper.py",
         browser_profile_dir="/tmp/profile",

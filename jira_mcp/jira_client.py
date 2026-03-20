@@ -105,6 +105,31 @@ class JiraClient:
         self._request("PUT", f"/issue/{issue_key}", json={"fields": fields})
         return {"status": "ok", "issue_key": issue_key, "updated_fields": sorted(fields.keys())}
 
+    def create_issue(
+        self,
+        project_key: str,
+        summary: str,
+        issue_type: str,
+        description: str | None,
+        fields: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        payload_fields = dict(fields or {})
+        issue_type_payload = {"id": issue_type} if issue_type.isdigit() else {"name": issue_type}
+        payload_fields["project"] = {"key": project_key}
+        payload_fields["issuetype"] = issue_type_payload
+        payload_fields["summary"] = summary
+        if description is not None:
+            payload_fields["description"] = description
+
+        response = self._request("POST", "/issue", json={"fields": payload_fields})
+        payload = response.json()
+        return {
+            "status": "ok",
+            "issue_key": payload.get("key"),
+            "issue_id": payload.get("id"),
+            "issue_url": payload.get("self"),
+        }
+
     def list_transitions(self, issue_key: str) -> dict[str, Any]:
         response = self._request("GET", f"/issue/{issue_key}/transitions")
         payload = response.json()

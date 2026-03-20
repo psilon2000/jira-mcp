@@ -35,6 +35,8 @@ class Settings:
     default_limit: int
     write_project_whitelist: tuple[str, ...]
     write_issue_whitelist: tuple[str, ...]
+    enable_create_issue: bool
+    create_issue_project_whitelist: tuple[str, ...]
     enable_browser_recovery: bool
     browser_recovery_script_path: str
     browser_profile_dir: str
@@ -63,6 +65,20 @@ def _clean(value: str | None) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def _project_key(name: str) -> str | None:
+    value = _clean(os.getenv(name))
+    return value.upper() if value else None
+
+
+def _create_issue_project_whitelist() -> tuple[str, ...]:
+    projects = _csv("JIRA_CREATE_ISSUE_PROJECT_WHITELIST")
+    if projects:
+        return projects
+
+    legacy_project = _project_key("JIRA_CREATE_ISSUE_PROJECT")
+    return (legacy_project,) if legacy_project else ()
 
 
 def _normalize_auth_mode(raw: str | None) -> str:
@@ -113,6 +129,10 @@ def _validate_settings(settings: Settings) -> None:
         )
     if settings.browser_recovery_cooldown_minutes < 1:
         raise RuntimeError("JIRA_BROWSER_RECOVERY_COOLDOWN_MINUTES must be >= 1")
+    if settings.enable_create_issue and not settings.create_issue_project_whitelist:
+        raise RuntimeError(
+            "JIRA_CREATE_ISSUE_PROJECT_WHITELIST is required when JIRA_ENABLE_CREATE_ISSUE=true"
+        )
 
 
 def load_settings() -> Settings:
@@ -142,6 +162,8 @@ def load_settings() -> Settings:
         default_limit=max(1, min(default_limit, 200)),
         write_project_whitelist=_csv("JIRA_WRITE_PROJECT_WHITELIST"),
         write_issue_whitelist=_csv("JIRA_WRITE_ISSUE_WHITELIST"),
+        enable_create_issue=_flag("JIRA_ENABLE_CREATE_ISSUE", default=False),
+        create_issue_project_whitelist=_create_issue_project_whitelist(),
         enable_browser_recovery=_flag("JIRA_ENABLE_BROWSER_RECOVERY", default=False),
         browser_recovery_script_path=_clean(os.getenv("JIRA_BROWSER_RECOVERY_SCRIPT_PATH"))
         or _default_recovery_script_path(),
