@@ -5,12 +5,16 @@ MCP server (Python) for Jira read/write operations used in Telegram bot e2e test
 ## Features
 
 - Search/read issues (`jira_search_issues`, `jira_get_issue`)
+- List board sprints (`jira_list_board_sprints`)
 - Check available transitions (`jira_list_transitions`)
 - Add worklog (`jira_add_worklog`)
 - Create issue (`jira_create_issue`)
 - Update issue fields (`jira_update_issue`)
 - Transition issue (`jira_transition_issue`)
 - Add comment (`jira_add_comment`)
+- Add attachment (`jira_add_attachment`)
+- Add issues to sprint (`jira_add_issues_to_sprint`)
+- Remove issues from sprint (`jira_remove_issues_from_sprint`)
 - Auth check (`jira_auth_status`)
 
 Write safety:
@@ -37,6 +41,7 @@ Recommended auth setup:
 - `JIRA_PASSWORD=...`
 - `JIRA_WRITE_PROJECT_WHITELIST=TEAM`
 - `JIRA_WRITE_ISSUE_WHITELIST=TEAM-123`
+- `JIRA_WRITE_SPRINT_WHITELIST=456,457`
 - `JIRA_ENABLE_CREATE_ISSUE=false`
 - `JIRA_CREATE_ISSUE_PROJECT_WHITELIST=TEAM`
 
@@ -57,6 +62,15 @@ Browser recovery env:
 Create issue env:
 - `JIRA_ENABLE_CREATE_ISSUE=false`
 - `JIRA_CREATE_ISSUE_PROJECT_WHITELIST=TEAM`
+
+Sprint write env:
+- `JIRA_WRITE_SPRINT_WHITELIST=456,457`
+
+Sprint write notes:
+- `jira_add_issues_to_sprint` and `jira_remove_issues_from_sprint` work only with `confirm=true`.
+- Both tools require issue write permission from `JIRA_WRITE_PROJECT_WHITELIST` or `JIRA_WRITE_ISSUE_WHITELIST`.
+- Both tools also require `sprint_id` to be included in `JIRA_WRITE_SPRINT_WHITELIST`.
+- `jira_remove_issues_from_sprint` moves issues to backlog via Jira Agile API.
 
 Create issue notes:
 - `jira_create_issue` works only with `confirm=true`.
@@ -89,11 +103,18 @@ python -m unittest discover -s tests
 - `jira_auth_status()`
 - `jira_search_issues(jql="project = TEAM ORDER BY updated DESC", limit=20)`
 - `jira_get_issue(issue_key="TEAM-123")`
+- `jira_list_board_sprints(board_id=865, state="active")`
+- `jira_get_current_board_sprint(board_id=865)`
 - `jira_create_issue(project_key="TEAM", summary="Prepare release notes", confirm=True)`
 - `jira_create_issue(project_key="TEAM", summary="Prepare release notes", issue_type="Bug", description="Reported by QA", fields={"priority": {"name": "High"}}, confirm=True)`
 - `jira_create_issue(project_key="AQ", summary="Prepare AQ task", issue_type="10006", fields={"assignee": {"name": "<login>"}, "components": [{"id": "18340"}], "customfield_10901": {"id": "10403"}}, confirm=True)`
 - `jira_add_worklog(issue_key="TEAM-123", minutes=30, comment="e2e", confirm=True)`
 - `jira_add_worklog(issue_key="TEAM-123", minutes=30, comment="e2e", started="2026-03-04T09:30:00.000+0300", confirm=True)`
 - `jira_transition_issue(issue_key="TEAM-123", transition_id="31", confirm=True)`
+- `jira_add_attachment(issue_key="TEAM-123", file_path="/tmp/report.txt", confirm=True)`
+- `jira_add_issues_to_sprint(sprint_id=456, issue_keys=["AQ-123", "AQ-124"], confirm=True)`
+- `jira_remove_issues_from_sprint(sprint_id=456, issue_keys=["AQ-123"], confirm=True)`
+- `jira_add_issues_to_current_board_sprint(board_id=865, issue_keys=["AQ-123"], confirm=True)`
+- `jira_remove_issues_from_current_board_sprint(board_id=865, issue_keys=["AQ-123"], confirm=True)`
 
 `started` format for worklog: `YYYY-MM-DDTHH:MM:SS.000+ZZZZ` (for example `+0300`).

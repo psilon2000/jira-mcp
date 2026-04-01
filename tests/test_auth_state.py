@@ -26,6 +26,7 @@ def make_settings(storage_path: str, cookie: str | None = "JSESSIONID=configured
         default_limit=20,
         write_project_whitelist=(),
         write_issue_whitelist=(),
+        write_sprint_whitelist=(),
         enable_create_issue=False,
         create_issue_project_whitelist=(),
         enable_browser_recovery=False,

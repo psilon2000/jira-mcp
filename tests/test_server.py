@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib
 import os
+import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 
@@ -14,7 +16,7 @@ SERVER_ENV = {
 }
 
 
-class ServerCreateIssueTests(unittest.TestCase):
+class ServerToolTests(unittest.TestCase):
     def _load_server_module(self):
         config = importlib.import_module("jira_mcp.config")
         with patch.object(config, "load_dotenv", return_value=False), patch.dict(os.environ, SERVER_ENV, clear=True):
@@ -66,3 +68,76 @@ class ServerCreateIssueTests(unittest.TestCase):
             description="Create test issue",
             fields={"priority": {"name": "High"}},
         )
+
+    def test_add_issues_to_sprint_requires_confirm(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_sprint_whitelist=(123,), write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "confirm=true"):
+                server.jira_add_issues_to_sprint(sprint_id=123, issue_keys=["AQ-1"])
+
+    def test_add_attachment_requires_existing_file(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "does not exist"):
+                server.jira_add_attachment(issue_key="AQ-1", file_path="/tmp/missing.sql", confirm=True)
+
+    def test_add_attachment_calls_client(self) -> None:
+        server = self._load_server_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = Path(tmpdir) / "config.sql"
+            file_path.write_text("select 1;\n")
+            with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+                with patch.object(server.client, "add_attachment", return_value={"status": "ok", "attachment_id": "1"}) as add_attachment:
+                    result = server.jira_add_attachment(issue_key="aq-1", file_path=f" {file_path} ", confirm=True)
+
+        self.assertEqual(result, {"status": "ok", "attachment_id": "1"})
+        add_attachment.assert_called_once_with(issue_key="AQ-1", file_path=str(file_path.resolve()))
+
+    def test_add_issues_to_sprint_rejects_unapproved_sprint(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_sprint_whitelist=(123,), write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "not allowed"):
+                server.jira_add_issues_to_sprint(sprint_id=999, issue_keys=["AQ-1"], confirm=True)
+
+    def test_add_issues_to_sprint_calls_client(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_sprint_whitelist=(123,), write_project_whitelist=("AQ",))):
+            with patch.object(server.client, "add_issues_to_sprint", return_value={"status": "ok"}) as add_issues:
+                result = server.jira_add_issues_to_sprint(sprint_id=123, issue_keys=[" aq-1 ", "AQ-2"], confirm=True)
+
+        self.assertEqual(result, {"status": "ok"})
+        add_issues.assert_called_once_with(sprint_id=123, issue_keys=["AQ-1", "AQ-2"])
+
+    def test_remove_issues_from_sprint_calls_client(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_sprint_whitelist=(321,), write_project_whitelist=("AQ",))):
+            with patch.object(server.client, "remove_issues_from_sprint", return_value={"status": "ok", "issue_keys": ["AQ-1"]}) as remove_issues:
+                result = server.jira_remove_issues_from_sprint(sprint_id=321, issue_keys=["aq-1"], confirm=True)
+
+        self.assertEqual(result, {"status": "ok", "issue_keys": ["AQ-1"], "sprint_id": 321})
+        remove_issues.assert_called_once_with(issue_keys=["AQ-1"])
+
+    def test_list_board_sprints_validates_board_id(self) -> None:
+        server = self._load_server_module()
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            server.jira_list_board_sprints(board_id=0)
+
+    def test_get_current_board_sprint_delegates_to_client(self) -> None:
+        server = self._load_server_module()
+        expected = {"status": "ok", "board_id": 865, "selection": "future", "sprint": {"id": 293}}
+        with patch.object(server.client, "get_current_board_sprint", return_value=expected) as get_current:
+            result = server.jira_get_current_board_sprint(board_id=865)
+
+        self.assertEqual(result["sprint_id"], 293)
+        get_current.assert_called_once_with(board_id=865)
+
+    def test_add_issues_to_current_board_sprint_calls_client(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_sprint_whitelist=(293,), write_project_whitelist=("AQ",))):
+            with patch.object(server.client, "get_current_board_sprint", return_value={"status": "ok", "board_id": 865, "selection": "future", "sprint": {"id": 293, "name": "SCRUM Спринт 63"}}):
+                with patch.object(server.client, "add_issues_to_sprint", return_value={"status": "ok", "sprint_id": 293, "issue_keys": ["AQ-1"]}) as add_issues:
+                    result = server.jira_add_issues_to_current_board_sprint(board_id=865, issue_keys=["aq-1"], confirm=True)
+
+        self.assertEqual(result["board_id"], 865)
+        self.assertEqual(result["selection"], "future")
+        add_issues.assert_called_once_with(sprint_id=293, issue_keys=["AQ-1"])

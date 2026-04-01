@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -83,6 +84,70 @@ class JiraClient:
         response = self._request("GET", f"/issue/{issue_key}", params=params or None)
         return {"status": "ok", "issue": response.json()}
 
+    def list_board_sprints(
+        self,
+        board_id: int,
+        state: str | None,
+        limit: int,
+        start_at: int,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "startAt": max(0, start_at),
+            "maxResults": max(1, min(limit, 200)),
+        }
+        if state:
+            params["state"] = state
+
+        response = self._request_agile("GET", f"/board/{board_id}/sprint", params=params)
+        payload = response.json()
+        values = payload.get("values", []) or []
+        return {
+            "status": "ok",
+            "board_id": board_id,
+            "count": len(values),
+            "is_last": payload.get("isLast"),
+            "max_results": payload.get("maxResults"),
+            "start_at": payload.get("startAt"),
+            "total": payload.get("total"),
+            "sprints": values,
+        }
+
+    def get_current_board_sprint(self, board_id: int) -> dict[str, Any]:
+        active = self.list_board_sprints(board_id=board_id, state="active", limit=1, start_at=0)
+        active_sprints = active.get("sprints", []) or []
+        if active_sprints:
+            sprint = active_sprints[0]
+            return {
+                "status": "ok",
+                "board_id": board_id,
+                "selection": "active",
+                "sprint": sprint,
+            }
+
+        future = self.list_board_sprints(board_id=board_id, state="future", limit=50, start_at=0)
+        future_sprints = future.get("sprints", []) or []
+        if future_sprints:
+            sprint = sorted(
+                future_sprints,
+                key=lambda item: (
+                    item.get("startDate") or "9999-12-31T23:59:59.999+0000",
+                    item.get("id") or 0,
+                ),
+            )[0]
+            return {
+                "status": "ok",
+                "board_id": board_id,
+                "selection": "future",
+                "sprint": sprint,
+            }
+
+        return {
+            "status": "ok",
+            "board_id": board_id,
+            "selection": "none",
+            "sprint": None,
+        }
+
     def add_worklog(self, issue_key: str, minutes: int, comment: str | None, started: str | None) -> dict[str, Any]:
         body: dict[str, Any] = {"timeSpentSeconds": max(1, minutes) * 60}
         if comment:
@@ -163,8 +228,60 @@ class JiraClient:
         payload = response.json()
         return {"status": "ok", "issue_key": issue_key, "comment_id": payload.get("id")}
 
+    def add_attachment(self, issue_key: str, file_path: str) -> dict[str, Any]:
+        path = Path(file_path).expanduser().resolve()
+        with path.open("rb") as fh:
+            response = self._request(
+                "POST",
+                f"/issue/{issue_key}/attachments",
+                headers={"X-Atlassian-Token": "no-check"},
+                files={"file": (path.name, fh)},
+            )
+        payload = response.json()
+        attachments = payload if isinstance(payload, list) else []
+        attachment = attachments[0] if attachments else {}
+        return {
+            "status": "ok",
+            "issue_key": issue_key,
+            "file_path": str(path),
+            "filename": path.name,
+            "attachment_id": attachment.get("id"),
+            "attachment": attachment,
+        }
+
+    def add_issues_to_sprint(self, sprint_id: int, issue_keys: list[str]) -> dict[str, Any]:
+        self._request_agile("POST", f"/sprint/{sprint_id}/issue", json={"issues": issue_keys})
+        return {
+            "status": "ok",
+            "sprint_id": sprint_id,
+            "issue_keys": issue_keys,
+            "issue_count": len(issue_keys),
+        }
+
+    def remove_issues_from_sprint(self, issue_keys: list[str]) -> dict[str, Any]:
+        self._request_agile("POST", "/backlog/issue", json={"issues": issue_keys})
+        return {
+            "status": "ok",
+            "issue_keys": issue_keys,
+            "issue_count": len(issue_keys),
+        }
+
     def _request(self, method: str, path: str, allow_browser_recovery: bool = True, **kwargs: Any) -> Response:
         url = f"{self._settings.rest_root.rstrip('/')}/{path.lstrip('/')}"
+        return self._request_absolute_url(method, url, path, allow_browser_recovery=allow_browser_recovery, **kwargs)
+
+    def _request_agile(self, method: str, path: str, allow_browser_recovery: bool = True, **kwargs: Any) -> Response:
+        url = f"{self._settings.agile_rest_root.rstrip('/')}/{path.lstrip('/')}"
+        return self._request_absolute_url(method, url, path, allow_browser_recovery=allow_browser_recovery, **kwargs)
+
+    def _request_absolute_url(
+        self,
+        method: str,
+        url: str,
+        path: str,
+        allow_browser_recovery: bool = True,
+        **kwargs: Any,
+    ) -> Response:
         attempts = self._build_auth_attempts()
         if not attempts:
             raise RuntimeError("Jira auth has no usable credentials")
@@ -193,7 +310,7 @@ class JiraClient:
             recovery = self._recovery_service.try_recover(f"Jira auth failed after attempts: {' -> '.join(tried)}")
             if recovery.is_success:
                 self._reset_sessions()
-                return self._request(method, path, allow_browser_recovery=False, **kwargs)
+                return self._request_absolute_url(method, url, path, allow_browser_recovery=False, **kwargs)
             raise RuntimeError(
                 f"Jira auth failed after attempts: {' -> '.join(tried)}; recovery={recovery.details}"
             )

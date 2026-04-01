@@ -35,6 +35,7 @@ class Settings:
     default_limit: int
     write_project_whitelist: tuple[str, ...]
     write_issue_whitelist: tuple[str, ...]
+    write_sprint_whitelist: tuple[int, ...]
     enable_create_issue: bool
     create_issue_project_whitelist: tuple[str, ...]
     enable_browser_recovery: bool
@@ -47,6 +48,10 @@ class Settings:
     def rest_root(self) -> str:
         return f"{self.base_url.rstrip('/')}/rest/api/{self.api_version}"
 
+    @property
+    def agile_rest_root(self) -> str:
+        return f"{self.base_url.rstrip('/')}/rest/agile/1.0"
+
 
 def _csv(name: str) -> tuple[str, ...]:
     raw = os.getenv(name, "")
@@ -58,6 +63,23 @@ def _flag(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _csv_int(name: str) -> tuple[int, ...]:
+    raw = os.getenv(name, "")
+    values: list[int] = []
+    for part in raw.split(","):
+        value = part.strip()
+        if not value:
+            continue
+        try:
+            parsed = int(value)
+        except ValueError as exc:
+            raise RuntimeError(f"{name} must contain only integers") from exc
+        if parsed <= 0:
+            raise RuntimeError(f"{name} must contain only positive integers")
+        values.append(parsed)
+    return tuple(values)
 
 
 def _clean(value: str | None) -> str | None:
@@ -162,6 +184,7 @@ def load_settings() -> Settings:
         default_limit=max(1, min(default_limit, 200)),
         write_project_whitelist=_csv("JIRA_WRITE_PROJECT_WHITELIST"),
         write_issue_whitelist=_csv("JIRA_WRITE_ISSUE_WHITELIST"),
+        write_sprint_whitelist=_csv_int("JIRA_WRITE_SPRINT_WHITELIST"),
         enable_create_issue=_flag("JIRA_ENABLE_CREATE_ISSUE", default=False),
         create_issue_project_whitelist=_create_issue_project_whitelist(),
         enable_browser_recovery=_flag("JIRA_ENABLE_BROWSER_RECOVERY", default=False),

@@ -74,3 +74,25 @@ class ConfigTests(unittest.TestCase):
         with patch("jira_mcp.config.load_dotenv", return_value=False), patch.dict(os.environ, env, clear=True):
             settings = load_settings()
         self.assertEqual(settings.create_issue_project_whitelist, ("TEAM",))
+
+    def test_load_settings_normalizes_write_sprint_whitelist(self) -> None:
+        env = {
+            "JIRA_BASE_URL": "https://jira.example.local",
+            "JIRA_AUTH_MODE": "cookie",
+            "JIRA_COOKIE": "JSESSIONID=value",
+            "JIRA_WRITE_SPRINT_WHITELIST": " 101, 202 ",
+        }
+        with patch("jira_mcp.config.load_dotenv", return_value=False), patch.dict(os.environ, env, clear=True):
+            settings = load_settings()
+        self.assertEqual(settings.write_sprint_whitelist, (101, 202))
+
+    def test_load_settings_rejects_non_numeric_sprint_whitelist(self) -> None:
+        env = {
+            "JIRA_BASE_URL": "https://jira.example.local",
+            "JIRA_AUTH_MODE": "cookie",
+            "JIRA_COOKIE": "JSESSIONID=value",
+            "JIRA_WRITE_SPRINT_WHITELIST": "abc",
+        }
+        with patch("jira_mcp.config.load_dotenv", return_value=False), patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "only integers"):
+                load_settings()

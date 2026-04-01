@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -45,6 +46,56 @@ def _ensure_write_allowed(issue_key: str, confirm: bool) -> None:
         return
 
     raise ValueError(f"issue '{issue}' is not allowed by write whitelist")
+
+
+def _ensure_sprint_write_allowed(sprint_id: int, confirm: bool) -> int:
+    if not confirm:
+        raise ValueError("write requires explicit confirm=true")
+
+    sprint = int(sprint_id)
+    if sprint <= 0:
+        raise ValueError("sprint_id must be a positive integer")
+
+    if not settings.write_sprint_whitelist:
+        raise ValueError("write sprint whitelist is empty: set JIRA_WRITE_SPRINT_WHITELIST")
+
+    if sprint not in settings.write_sprint_whitelist:
+        raise ValueError(f"sprint '{sprint}' is not allowed by sprint whitelist")
+
+    return sprint
+
+
+def _normalize_issue_keys(issue_keys: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for issue_key in issue_keys:
+        issue = (issue_key or "").strip().upper()
+        if not issue:
+            continue
+        normalized.append(issue)
+    if not normalized:
+        raise ValueError("issue_keys must not be empty")
+    return normalized
+
+
+def _normalize_board_id(board_id: int) -> int:
+    board = int(board_id)
+    if board <= 0:
+        raise ValueError("board_id must be a positive integer")
+    return board
+
+
+def _resolve_current_board_sprint(board_id: int) -> dict[str, Any]:
+    board = _normalize_board_id(board_id)
+    result = client.get_current_board_sprint(board_id=board)
+    sprint = result.get("sprint")
+    if not sprint:
+        raise ValueError(f"board '{board}' has no active or future sprint")
+    sprint_id = sprint.get("id")
+    if not sprint_id:
+        raise ValueError(f"board '{board}' returned sprint without id")
+    result["board_id"] = board
+    result["sprint_id"] = int(sprint_id)
+    return result
 
 
 def _ensure_create_issue_allowed(project_key: str, confirm: bool) -> str:
@@ -97,6 +148,30 @@ def jira_get_issue(
     if not issue_key.strip():
         raise ValueError("issue_key is required")
     return client.get_issue(issue_key=issue_key.strip(), fields=fields, expand=expand)
+
+
+@mcp.tool()
+def jira_list_board_sprints(
+    board_id: int,
+    state: str | None = None,
+    limit: int | None = None,
+    start_at: int = 0,
+) -> dict[str, Any]:
+    """List board sprints by Agile board id."""
+    board = _normalize_board_id(board_id)
+    state_value = state.strip() if state else None
+    return client.list_board_sprints(
+        board_id=board,
+        state=state_value,
+        limit=limit or settings.default_limit,
+        start_at=start_at,
+    )
+
+
+@mcp.tool()
+def jira_get_current_board_sprint(board_id: int) -> dict[str, Any]:
+    """Get current sprint for board id: active sprint or nearest future sprint."""
+    return _resolve_current_board_sprint(board_id)
 
 
 @mcp.tool()
@@ -184,6 +259,81 @@ def jira_add_comment(issue_key: str, comment: str, confirm: bool = False) -> dic
     if not comment.strip():
         raise ValueError("comment must not be empty")
     return client.add_comment(issue_key=issue_key.strip(), comment=comment)
+
+
+@mcp.tool()
+def jira_add_attachment(issue_key: str, file_path: str, confirm: bool = False) -> dict[str, Any]:
+    """Add attachment to issue (confirm + whitelist required)."""
+    _ensure_write_allowed(issue_key, confirm)
+    issue = issue_key.strip().upper()
+    file_path_value = file_path.strip()
+    if not file_path_value:
+        raise ValueError("file_path is required")
+    path = Path(file_path_value).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(f"file_path does not exist or is not a file: {path}")
+    return client.add_attachment(issue_key=issue, file_path=str(path))
+
+
+@mcp.tool()
+def jira_add_issues_to_sprint(sprint_id: int, issue_keys: list[str], confirm: bool = False) -> dict[str, Any]:
+    """Add issues to sprint (confirm + issue whitelist + sprint whitelist required)."""
+    sprint = _ensure_sprint_write_allowed(sprint_id, confirm)
+    issues = _normalize_issue_keys(issue_keys)
+    for issue_key in issues:
+        _ensure_write_allowed(issue_key, confirm)
+    return client.add_issues_to_sprint(sprint_id=sprint, issue_keys=issues)
+
+
+@mcp.tool()
+def jira_remove_issues_from_sprint(sprint_id: int, issue_keys: list[str], confirm: bool = False) -> dict[str, Any]:
+    """Remove issues from sprint into backlog (confirm + issue whitelist + sprint whitelist required)."""
+    _ensure_sprint_write_allowed(sprint_id, confirm)
+    issues = _normalize_issue_keys(issue_keys)
+    for issue_key in issues:
+        _ensure_write_allowed(issue_key, confirm)
+    result = client.remove_issues_from_sprint(issue_keys=issues)
+    result["sprint_id"] = int(sprint_id)
+    return result
+
+
+@mcp.tool()
+def jira_add_issues_to_current_board_sprint(
+    board_id: int,
+    issue_keys: list[str],
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Add issues to board current sprint: active sprint or nearest future sprint."""
+    current = _resolve_current_board_sprint(board_id)
+    sprint = _ensure_sprint_write_allowed(current["sprint_id"], confirm)
+    issues = _normalize_issue_keys(issue_keys)
+    for issue_key in issues:
+        _ensure_write_allowed(issue_key, confirm)
+    result = client.add_issues_to_sprint(sprint_id=sprint, issue_keys=issues)
+    result["board_id"] = current["board_id"]
+    result["selection"] = current["selection"]
+    result["sprint"] = current["sprint"]
+    return result
+
+
+@mcp.tool()
+def jira_remove_issues_from_current_board_sprint(
+    board_id: int,
+    issue_keys: list[str],
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Remove issues from board current sprint to backlog."""
+    current = _resolve_current_board_sprint(board_id)
+    _ensure_sprint_write_allowed(current["sprint_id"], confirm)
+    issues = _normalize_issue_keys(issue_keys)
+    for issue_key in issues:
+        _ensure_write_allowed(issue_key, confirm)
+    result = client.remove_issues_from_sprint(issue_keys=issues)
+    result["board_id"] = current["board_id"]
+    result["selection"] = current["selection"]
+    result["sprint_id"] = current["sprint_id"]
+    result["sprint"] = current["sprint"]
+    return result
 
 
 def main() -> None:

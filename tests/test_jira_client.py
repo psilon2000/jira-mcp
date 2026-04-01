@@ -23,6 +23,7 @@ class JiraTestServer(ThreadingHTTPServer):
         self.basic_header = "Basic " + base64.b64encode(b"bot:secret").decode()
         self.last_cookie_header: str | None = None
         self.last_json_body: dict | None = None
+        self.last_uploaded_file: dict[str, str | int] | None = None
         super().__init__(("127.0.0.1", 0), JiraHandler)
 
 
@@ -39,6 +40,17 @@ class JiraHandler(BaseHTTPRequestHandler):
 
         if path.endswith("/myself"):
             return self._handle_myself(cookie, auth)
+        if path.endswith("/board/865/sprint") and self.jira_server.scenario == "board_sprints":
+            return self._json(
+                200,
+                {
+                    "maxResults": 2,
+                    "startAt": 0,
+                    "total": 1,
+                    "isLast": True,
+                    "values": [{"id": 456, "name": "AQ Sprint 1", "state": "active"}],
+                },
+            )
         if path.endswith("/issue/TEAM-1/transitions"):
             if self.jira_server.scenario == "basic_with_cookies" and cookie == "JSESSIONID=session-cookie":
                 return self._json(200, {"transitions": [{"id": "1", "name": "Done"}]})
@@ -49,6 +61,23 @@ class JiraHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         content_length = int(self.headers.get("Content-Length", "0"))
         raw_body = self.rfile.read(content_length) if content_length else b""
+        if path.endswith("/issue/TEAM-1/attachments") and self.jira_server.scenario == "add_attachment":
+            self.jira_server.last_uploaded_file = {
+                "content_type": self.headers.get("Content-Type", ""),
+                "x_atlassian_token": self.headers.get("X-Atlassian-Token", ""),
+                "size": len(raw_body),
+                "body": raw_body.decode("utf-8", errors="ignore"),
+            }
+            return self._json(
+                200,
+                [
+                    {
+                        "id": "20001",
+                        "filename": "test.sql",
+                        "size": len(raw_body),
+                    }
+                ],
+            )
         self.jira_server.last_json_body = json.loads(raw_body.decode() or "{}")
 
         if path.endswith("/issue") and self.jira_server.scenario == "create_issue":
@@ -60,6 +89,10 @@ class JiraHandler(BaseHTTPRequestHandler):
                     "self": "https://jira.example.local/rest/api/2/issue/10001",
                 },
             )
+        if path.endswith("/sprint/456/issue") and self.jira_server.scenario == "sprint_write":
+            return self._json(201, {})
+        if path.endswith("/backlog/issue") and self.jira_server.scenario == "sprint_write":
+            return self._json(204, {})
 
         return self._json(404, {"errorMessages": ["not found"]})
 
@@ -133,6 +166,7 @@ def make_settings(base_url: str, storage_path: str, **overrides: object) -> Sett
         "default_limit": 20,
         "write_project_whitelist": (),
         "write_issue_whitelist": (),
+        "write_sprint_whitelist": (),
         "enable_create_issue": False,
         "create_issue_project_whitelist": (),
         "enable_browser_recovery": False,
@@ -286,3 +320,118 @@ class JiraClientTests(unittest.TestCase):
                     }
                 },
             )
+
+    def test_list_board_sprints_uses_agile_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("board_sprints") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            result = client.list_board_sprints(board_id=865, state="active", limit=10, start_at=0)
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["board_id"], 865)
+            self.assertEqual(result["count"], 1)
+            self.assertEqual(result["sprints"][0]["id"], 456)
+
+    def test_get_current_board_sprint_prefers_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("board_sprints") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            with unittest.mock.patch.object(client, "list_board_sprints") as list_sprints:
+                list_sprints.side_effect = [
+                    {"sprints": [{"id": 111, "name": "Active Sprint", "state": "active"}]},
+                ]
+                result = client.get_current_board_sprint(board_id=865)
+
+            self.assertEqual(result["selection"], "active")
+            self.assertEqual(result["sprint"]["id"], 111)
+
+    def test_get_current_board_sprint_falls_back_to_future(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("board_sprints") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            with unittest.mock.patch.object(client, "list_board_sprints") as list_sprints:
+                list_sprints.side_effect = [
+                    {"sprints": []},
+                    {"sprints": [{"id": 293, "name": "SCRUM Спринт 63", "state": "future"}, {"id": 294, "name": "SCRUM Спринт 64", "state": "future"}]},
+                ]
+                result = client.get_current_board_sprint(board_id=865)
+
+            self.assertEqual(result["selection"], "future")
+            self.assertEqual(result["sprint"]["id"], 293)
+
+    def test_add_issues_to_sprint_posts_expected_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("sprint_write") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            result = client.add_issues_to_sprint(sprint_id=456, issue_keys=["AQ-1", "AQ-2"])
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(server.last_json_body, {"issues": ["AQ-1", "AQ-2"]})
+
+    def test_remove_issues_from_sprint_posts_expected_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("sprint_write") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            result = client.remove_issues_from_sprint(issue_keys=["AQ-1"])
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(server.last_json_body, {"issues": ["AQ-1"]})
+
+    def test_add_attachment_posts_multipart_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("add_attachment") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+            sql_file = Path(tmpdir) / "test.sql"
+            sql_file.write_text("select 1;\n")
+
+            result = client.add_attachment(issue_key="TEAM-1", file_path=str(sql_file))
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["attachment_id"], "20001")
+            self.assertEqual(result["filename"], "test.sql")
+            self.assertIsNotNone(server.last_uploaded_file)
+            assert server.last_uploaded_file is not None
+            self.assertIn("multipart/form-data", str(server.last_uploaded_file["content_type"]))
+            self.assertEqual(server.last_uploaded_file["x_atlassian_token"], "no-check")
+            self.assertIn('filename="test.sql"', str(server.last_uploaded_file["body"]))
