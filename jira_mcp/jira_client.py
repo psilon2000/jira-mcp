@@ -230,13 +230,13 @@ class JiraClient:
 
     def add_attachment(self, issue_key: str, file_path: str) -> dict[str, Any]:
         path = Path(file_path).expanduser().resolve()
-        with path.open("rb") as fh:
-            response = self._request(
-                "POST",
-                f"/issue/{issue_key}/attachments",
-                headers={"X-Atlassian-Token": "no-check"},
-                files={"file": (path.name, fh)},
-            )
+        content = path.read_bytes()
+        response = self._request(
+            "POST",
+            f"/issue/{issue_key}/attachments",
+            headers={"X-Atlassian-Token": "no-check"},
+            files={"file": (path.name, content)},
+        )
         payload = response.json()
         attachments = payload if isinstance(payload, list) else []
         attachment = attachments[0] if attachments else {}

@@ -55,6 +55,13 @@ class JiraHandler(BaseHTTPRequestHandler):
             if self.jira_server.scenario == "basic_with_cookies" and cookie == "JSESSIONID=session-cookie":
                 return self._json(200, {"transitions": [{"id": "1", "name": "Done"}]})
             return self._json(403, {"errorMessages": ["forbidden"]})
+        if path.endswith("/issue/TEAM-1/attachments") and self.jira_server.scenario == "attachment_cookie_fallback":
+            if cookie == "JSESSIONID=bad-cookie":
+                return self._json(403, {"errorMessages": ["bad cookie"]})
+            auth = self.headers.get("Authorization")
+            if auth == self.jira_server.basic_header:
+                return self._json(200, [{"id": "20002", "filename": "test.sql"}])
+            return self._json(403, {"errorMessages": ["forbidden"]})
         return self._json(404, {"errorMessages": ["not found"]})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -78,6 +85,18 @@ class JiraHandler(BaseHTTPRequestHandler):
                     }
                 ],
             )
+        if path.endswith("/issue/TEAM-1/attachments") and self.jira_server.scenario == "attachment_cookie_fallback":
+            self.jira_server.last_uploaded_file = {
+                "content_type": self.headers.get("Content-Type", ""),
+                "x_atlassian_token": self.headers.get("X-Atlassian-Token", ""),
+                "size": len(raw_body),
+                "body": raw_body.decode("utf-8", errors="ignore"),
+            }
+            if self.headers.get("Cookie") == "JSESSIONID=bad-cookie":
+                return self._json(403, {"errorMessages": ["bad cookie"]})
+            if self.headers.get("Authorization") == self.jira_server.basic_header:
+                return self._json(200, [{"id": "20002", "filename": "test.sql"}])
+            return self._json(403, {"errorMessages": ["forbidden"]})
         self.jira_server.last_json_body = json.loads(raw_body.decode() or "{}")
 
         if path.endswith("/issue") and self.jira_server.scenario == "create_issue":
@@ -434,4 +453,24 @@ class JiraClientTests(unittest.TestCase):
             assert server.last_uploaded_file is not None
             self.assertIn("multipart/form-data", str(server.last_uploaded_file["content_type"]))
             self.assertEqual(server.last_uploaded_file["x_atlassian_token"], "no-check")
+            self.assertIn('filename="test.sql"', str(server.last_uploaded_file["body"]))
+
+    def test_add_attachment_survives_auth_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("attachment_cookie_fallback") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+            sql_file = Path(tmpdir) / "test.sql"
+            sql_file.write_text("select 1;\n")
+
+            result = client.add_attachment(issue_key="TEAM-1", file_path=str(sql_file))
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["attachment_id"], "20002")
+            self.assertIsNotNone(server.last_uploaded_file)
+            assert server.last_uploaded_file is not None
+            self.assertGreater(int(server.last_uploaded_file["size"]), 0)
             self.assertIn('filename="test.sql"', str(server.last_uploaded_file["body"]))
