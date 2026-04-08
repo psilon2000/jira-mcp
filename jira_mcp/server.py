@@ -196,12 +196,32 @@ def jira_add_worklog(
 
 
 @mcp.tool()
-def jira_update_issue(issue_key: str, fields: dict[str, Any], confirm: bool = False) -> dict[str, Any]:
-    """Update issue fields (confirm + whitelist required)."""
+def jira_update_issue(
+    issue_key: str,
+    description: str | None = None,
+    fields: dict[str, Any] | None = None,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Update issue fields, including description (confirm + whitelist required)."""
     _ensure_write_allowed(issue_key, confirm)
-    if not fields:
-        raise ValueError("fields must not be empty")
-    return client.update_issue(issue_key=issue_key.strip(), fields=fields)
+    issue = issue_key.strip().upper()
+
+    payload_fields = dict(fields or {})
+    if description is not None:
+        payload_fields["description"] = description
+
+    if not payload_fields:
+        raise ValueError("description or fields must not be empty")
+
+    return client.update_issue(issue_key=issue, fields=payload_fields)
+
+
+@mcp.tool()
+def jira_update_description(issue_key: str, description: str, confirm: bool = False) -> dict[str, Any]:
+    """Update only the issue description (confirm + whitelist required)."""
+    if not (description or "").strip():
+        raise ValueError("description must not be empty")
+    return jira_update_issue(issue_key=issue_key, description=description, confirm=confirm)
 
 
 @mcp.tool()
@@ -259,6 +279,19 @@ def jira_add_comment(issue_key: str, comment: str, confirm: bool = False) -> dic
     if not comment.strip():
         raise ValueError("comment must not be empty")
     return client.add_comment(issue_key=issue_key.strip(), comment=comment)
+
+
+@mcp.tool()
+def jira_update_comment(issue_key: str, comment_id: str, comment: str, confirm: bool = False) -> dict[str, Any]:
+    """Update comment on issue (confirm + whitelist required)."""
+    _ensure_write_allowed(issue_key, confirm)
+    issue = issue_key.strip().upper()
+    comment_id_value = str(comment_id).strip()
+    if not comment_id_value:
+        raise ValueError("comment_id is required")
+    if not comment.strip():
+        raise ValueError("comment must not be empty")
+    return client.update_comment(issue_key=issue, comment_id=comment_id_value, comment=comment)
 
 
 @mcp.tool()

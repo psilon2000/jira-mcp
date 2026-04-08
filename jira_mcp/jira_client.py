@@ -228,6 +228,10 @@ class JiraClient:
         payload = response.json()
         return {"status": "ok", "issue_key": issue_key, "comment_id": payload.get("id")}
 
+    def update_comment(self, issue_key: str, comment_id: str, comment: str) -> dict[str, Any]:
+        self._request("PUT", f"/issue/{issue_key}/comment/{comment_id}", json={"body": comment})
+        return {"status": "ok", "issue_key": issue_key, "comment_id": str(comment_id)}
+
     def add_attachment(self, issue_key: str, file_path: str) -> dict[str, Any]:
         path = Path(file_path).expanduser().resolve()
         content = path.read_bytes()

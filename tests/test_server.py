@@ -69,6 +69,74 @@ class ServerToolTests(unittest.TestCase):
             fields={"priority": {"name": "High"}},
         )
 
+    def test_update_issue_requires_description_or_fields(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "description or fields"):
+                server.jira_update_issue(issue_key="AQ-1", confirm=True)
+
+    def test_update_issue_passes_description_as_field(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with patch.object(server.client, "update_issue", return_value={"status": "ok"}) as update_issue:
+                result = server.jira_update_issue(issue_key="aq-1", description="Updated description", confirm=True)
+
+        self.assertEqual(result, {"status": "ok"})
+        update_issue.assert_called_once_with(issue_key="AQ-1", fields={"description": "Updated description"})
+
+    def test_update_issue_merges_description_with_fields(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with patch.object(server.client, "update_issue", return_value={"status": "ok"}) as update_issue:
+                result = server.jira_update_issue(
+                    issue_key="aq-1",
+                    description="Updated description",
+                    fields={"priority": {"name": "High"}},
+                    confirm=True,
+                )
+
+        self.assertEqual(result, {"status": "ok"})
+        update_issue.assert_called_once_with(
+            issue_key="AQ-1",
+            fields={"priority": {"name": "High"}, "description": "Updated description"},
+        )
+
+    def test_update_description_requires_non_empty_description(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "description must not be empty"):
+                server.jira_update_description(issue_key="AQ-1", description="   ", confirm=True)
+
+    def test_update_description_delegates_to_update_issue(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with patch.object(server, "jira_update_issue", return_value={"status": "ok"}) as update_issue:
+                result = server.jira_update_description(issue_key="aq-1", description="Updated description", confirm=True)
+
+        self.assertEqual(result, {"status": "ok"})
+        update_issue.assert_called_once_with(issue_key="aq-1", description="Updated description", confirm=True)
+
+    def test_update_comment_requires_comment_id(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "comment_id is required"):
+                server.jira_update_comment(issue_key="AQ-1", comment_id="   ", comment="text", confirm=True)
+
+    def test_update_comment_requires_non_empty_comment(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "comment must not be empty"):
+                server.jira_update_comment(issue_key="AQ-1", comment_id="123", comment="   ", confirm=True)
+
+    def test_update_comment_calls_client(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with patch.object(server.client, "update_comment", return_value={"status": "ok", "comment_id": "123"}) as update_comment:
+                result = server.jira_update_comment(issue_key="aq-1", comment_id=" 123 ", comment="Updated", confirm=True)
+
+        self.assertEqual(result, {"status": "ok", "comment_id": "123"})
+        update_comment.assert_called_once_with(issue_key="AQ-1", comment_id="123", comment="Updated")
+
     def test_add_issues_to_sprint_requires_confirm(self) -> None:
         server = self._load_server_module()
         with patch.object(server, "settings", replace(server.settings, write_sprint_whitelist=(123,), write_project_whitelist=("AQ",))):

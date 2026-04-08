@@ -115,6 +115,23 @@ class JiraHandler(BaseHTTPRequestHandler):
 
         return self._json(404, {"errorMessages": ["not found"]})
 
+    def do_PUT(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length) if content_length else b""
+        self.jira_server.last_json_body = json.loads(raw_body.decode() or "{}")
+
+        if path.endswith("/issue/TEAM-1") and self.jira_server.scenario == "update_issue":
+            self.send_response(204)
+            self.end_headers()
+            return
+        if path.endswith("/issue/TEAM-1/comment/123") and self.jira_server.scenario == "update_comment":
+            self.send_response(204)
+            self.end_headers()
+            return
+
+        return self._json(404, {"errorMessages": ["not found"]})
+
     def log_message(self, format: str, *args: object) -> None:
         return
 
@@ -339,6 +356,50 @@ class JiraClientTests(unittest.TestCase):
                     }
                 },
             )
+
+    def test_update_issue_puts_expected_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("update_issue") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            result = client.update_issue(
+                issue_key="TEAM-1",
+                fields={"description": "Updated description", "priority": {"name": "High"}},
+            )
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["updated_fields"], ["description", "priority"])
+            self.assertEqual(
+                server.last_json_body,
+                {
+                    "fields": {
+                        "description": "Updated description",
+                        "priority": {"name": "High"},
+                    }
+                },
+            )
+
+    def test_update_comment_puts_expected_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("update_comment") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            result = client.update_comment(issue_key="TEAM-1", comment_id="123", comment="Updated comment")
+
+            self.assertEqual(result, {"status": "ok", "issue_key": "TEAM-1", "comment_id": "123"})
+            self.assertEqual(server.last_json_body, {"body": "Updated comment"})
 
     def test_list_board_sprints_uses_agile_endpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("board_sprints") as server:

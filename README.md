@@ -9,9 +9,10 @@ MCP server (Python) for Jira read/write operations used in Telegram bot e2e test
 - Check available transitions (`jira_list_transitions`)
 - Add worklog (`jira_add_worklog`)
 - Create issue (`jira_create_issue`)
-- Update issue fields (`jira_update_issue`)
+- Update issue fields and description (`jira_update_issue`)
 - Transition issue (`jira_transition_issue`)
 - Add comment (`jira_add_comment`)
+- Update comment (`jira_update_comment`)
 - Add attachment (`jira_add_attachment`)
 - Add issues to sprint (`jira_add_issues_to_sprint`)
 - Remove issues from sprint (`jira_remove_issues_from_sprint`)
@@ -110,7 +111,11 @@ python -m unittest discover -s tests
 - `jira_create_issue(project_key="AQ", summary="Prepare AQ task", issue_type="10006", fields={"assignee": {"name": "<login>"}, "components": [{"id": "18340"}], "customfield_10901": {"id": "10403"}}, confirm=True)`
 - `jira_add_worklog(issue_key="TEAM-123", minutes=30, comment="e2e", confirm=True)`
 - `jira_add_worklog(issue_key="TEAM-123", minutes=30, comment="e2e", started="2026-03-04T09:30:00.000+0300", confirm=True)`
+- `jira_update_issue(issue_key="TEAM-123", description="New description", confirm=True)`
+- `jira_update_issue(issue_key="TEAM-123", description="New description", fields={"priority": {"name": "High"}}, confirm=True)`
+- `jira_update_description(issue_key="TEAM-123", description="New description", confirm=True)`
 - `jira_transition_issue(issue_key="TEAM-123", transition_id="31", confirm=True)`
+- `jira_update_comment(issue_key="TEAM-123", comment_id="456", comment="Updated text", confirm=True)`
 - `jira_add_attachment(issue_key="TEAM-123", file_path="/tmp/report.txt", confirm=True)`
 - `jira_add_issues_to_sprint(sprint_id=456, issue_keys=["AQ-123", "AQ-124"], confirm=True)`
 - `jira_remove_issues_from_sprint(sprint_id=456, issue_keys=["AQ-123"], confirm=True)`
