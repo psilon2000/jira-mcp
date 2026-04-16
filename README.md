@@ -10,6 +10,7 @@ MCP server (Python) for Jira read/write operations used in Telegram bot e2e test
 - Add worklog (`jira_add_worklog`)
 - Create issue (`jira_create_issue`)
 - Update issue fields and description (`jira_update_issue`)
+- Link issues (`jira_link_issues`)
 - Transition issue (`jira_transition_issue`)
 - Add comment (`jira_add_comment`)
 - Update comment (`jira_update_comment`)
@@ -20,6 +21,7 @@ MCP server (Python) for Jira read/write operations used in Telegram bot e2e test
 
 Write safety:
 - `confirm=true` is required for all write tools.
+- `jira_add_comment` additionally requires a separate explicit confirmation string: `comment_confirm="ADD_COMMENT <ISSUE-KEY>"`.
 - Write is allowed only for issue/project whitelist from env.
 - Issue creation has a separate feature flag and is restricted to one configured project.
 
@@ -113,8 +115,10 @@ python -m unittest discover -s tests
 - `jira_add_worklog(issue_key="TEAM-123", minutes=30, comment="e2e", started="2026-03-04T09:30:00.000+0300", confirm=True)`
 - `jira_update_issue(issue_key="TEAM-123", description="New description", confirm=True)`
 - `jira_update_issue(issue_key="TEAM-123", description="New description", fields={"priority": {"name": "High"}}, confirm=True)`
+- `jira_link_issues(source_issue_key="PV-1", target_issue_key="FRMM-1", link_type="Relates", confirm=True)`
 - `jira_update_description(issue_key="TEAM-123", description="New description", confirm=True)`
 - `jira_transition_issue(issue_key="TEAM-123", transition_id="31", confirm=True)`
+- `jira_add_comment(issue_key="TEAM-123", comment="Need DBA check", comment_confirm="ADD_COMMENT TEAM-123", confirm=True)`
 - `jira_update_comment(issue_key="TEAM-123", comment_id="456", comment="Updated text", confirm=True)`
 - `jira_add_attachment(issue_key="TEAM-123", file_path="/tmp/report.txt", confirm=True)`
 - `jira_add_issues_to_sprint(sprint_id=456, issue_keys=["AQ-123", "AQ-124"], confirm=True)`

@@ -48,6 +48,24 @@ def _ensure_write_allowed(issue_key: str, confirm: bool) -> None:
     raise ValueError(f"issue '{issue}' is not allowed by write whitelist")
 
 
+def _expected_comment_confirmation(issue_key: str) -> str:
+    issue = (issue_key or "").strip().upper()
+    return f"ADD_COMMENT {issue}"
+
+
+def _ensure_comment_write_allowed(issue_key: str, confirm: bool, comment_confirm: str) -> str:
+    _ensure_write_allowed(issue_key, confirm)
+    issue = issue_key.strip().upper()
+    expected = _expected_comment_confirmation(issue)
+    actual = (comment_confirm or "").strip().upper()
+    if actual != expected:
+        raise ValueError(
+            "jira_add_comment requires separate explicit confirmation: "
+            f"comment_confirm must equal '{expected}'"
+        )
+    return issue
+
+
 def _ensure_sprint_write_allowed(sprint_id: int, confirm: bool) -> int:
     if not confirm:
         raise ValueError("write requires explicit confirm=true")
@@ -273,12 +291,45 @@ def jira_transition_issue(
 
 
 @mcp.tool()
-def jira_add_comment(issue_key: str, comment: str, confirm: bool = False) -> dict[str, Any]:
-    """Add comment to issue (confirm + whitelist required)."""
-    _ensure_write_allowed(issue_key, confirm)
+def jira_add_comment(
+    issue_key: str,
+    comment: str,
+    comment_confirm: str = "",
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Add comment to issue (confirm + whitelist + separate comment confirmation required)."""
+    issue = _ensure_comment_write_allowed(issue_key, confirm, comment_confirm)
     if not comment.strip():
         raise ValueError("comment must not be empty")
-    return client.add_comment(issue_key=issue_key.strip(), comment=comment)
+    return client.add_comment(issue_key=issue, comment=comment)
+
+
+@mcp.tool()
+def jira_link_issues(
+    source_issue_key: str,
+    target_issue_key: str,
+    link_type: str = "Relates",
+    comment: str | None = None,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Create issue link between two issues (confirm + whitelist required for both)."""
+    _ensure_write_allowed(source_issue_key, confirm)
+    _ensure_write_allowed(target_issue_key, confirm)
+    source_issue = source_issue_key.strip().upper()
+    target_issue = target_issue_key.strip().upper()
+    if not source_issue:
+        raise ValueError("source_issue_key is required")
+    if not target_issue:
+        raise ValueError("target_issue_key is required")
+    link_type_value = (link_type or "").strip()
+    if not link_type_value:
+        raise ValueError("link_type is required")
+    return client.link_issues(
+        source_issue_key=source_issue,
+        target_issue_key=target_issue,
+        link_type=link_type_value,
+        comment=comment.strip() if comment and comment.strip() else None,
+    )
 
 
 @mcp.tool()

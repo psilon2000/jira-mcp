@@ -122,6 +122,69 @@ class ServerToolTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "comment_id is required"):
                 server.jira_update_comment(issue_key="AQ-1", comment_id="   ", comment="text", confirm=True)
 
+    def test_add_comment_requires_confirm(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "confirm=true"):
+                server.jira_add_comment(issue_key="AQ-1", comment="text", comment_confirm="ADD_COMMENT AQ-1")
+
+    def test_add_comment_requires_separate_confirmation(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "comment_confirm must equal 'ADD_COMMENT AQ-1'"):
+                server.jira_add_comment(issue_key="AQ-1", comment="text", confirm=True)
+
+    def test_add_comment_calls_client(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with patch.object(server.client, "add_comment", return_value={"status": "ok", "comment_id": "123"}) as add_comment:
+                result = server.jira_add_comment(
+                    issue_key=" aq-1 ",
+                    comment="Added",
+                    comment_confirm="ADD_COMMENT AQ-1",
+                    confirm=True,
+                )
+
+        self.assertEqual(result, {"status": "ok", "comment_id": "123"})
+        add_comment.assert_called_once_with(issue_key="AQ-1", comment="Added")
+
+    def test_link_issues_requires_confirm(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "confirm=true"):
+                server.jira_link_issues(source_issue_key="AQ-1", target_issue_key="AQ-2")
+
+    def test_link_issues_requires_non_empty_link_type(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "link_type is required"):
+                server.jira_link_issues(
+                    source_issue_key="AQ-1",
+                    target_issue_key="AQ-2",
+                    link_type="   ",
+                    confirm=True,
+                )
+
+    def test_link_issues_calls_client(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ", "PV"))):
+            with patch.object(server.client, "link_issues", return_value={"status": "ok"}) as link_issues:
+                result = server.jira_link_issues(
+                    source_issue_key=" aq-1 ",
+                    target_issue_key=" pv-1 ",
+                    link_type="Relates",
+                    comment="Link frontend task",
+                    confirm=True,
+                )
+
+        self.assertEqual(result, {"status": "ok"})
+        link_issues.assert_called_once_with(
+            source_issue_key="AQ-1",
+            target_issue_key="PV-1",
+            link_type="Relates",
+            comment="Link frontend task",
+        )
+
     def test_update_comment_requires_non_empty_comment(self) -> None:
         server = self._load_server_module()
         with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
