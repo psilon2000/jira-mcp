@@ -43,6 +43,10 @@ class Settings:
     browser_profile_dir: str
     internal_cookie_storage_path: str
     browser_recovery_cooldown_minutes: int
+    enable_cache: bool
+    cache_path: str
+    cache_ttl_seconds: int
+    cache_max_entries: int
 
     @property
     def rest_root(self) -> str:
@@ -129,6 +133,10 @@ def _default_internal_cookie_storage_path() -> str:
     return str(_repo_root() / ".state" / "jira_cookie.json")
 
 
+def _default_cache_path() -> str:
+    return str(_repo_root() / ".state" / "jira_cache.json")
+
+
 def _validate_settings(settings: Settings) -> None:
     has_basic = bool(settings.username and settings.password)
     has_cookie = bool(settings.cookie)
@@ -151,6 +159,10 @@ def _validate_settings(settings: Settings) -> None:
         )
     if settings.browser_recovery_cooldown_minutes < 1:
         raise RuntimeError("JIRA_BROWSER_RECOVERY_COOLDOWN_MINUTES must be >= 1")
+    if settings.cache_ttl_seconds < 1:
+        raise RuntimeError("JIRA_CACHE_TTL_SECONDS must be >= 1")
+    if settings.cache_max_entries < 1:
+        raise RuntimeError("JIRA_CACHE_MAX_ENTRIES must be >= 1")
     if settings.enable_create_issue and not settings.create_issue_project_whitelist:
         raise RuntimeError(
             "JIRA_CREATE_ISSUE_PROJECT_WHITELIST is required when JIRA_ENABLE_CREATE_ISSUE=true"
@@ -196,6 +208,10 @@ def load_settings() -> Settings:
         browser_recovery_cooldown_minutes=int(
             (_clean(os.getenv("JIRA_BROWSER_RECOVERY_COOLDOWN_MINUTES")) or "60")
         ),
+        enable_cache=_flag("JIRA_ENABLE_CACHE", default=False),
+        cache_path=_clean(os.getenv("JIRA_CACHE_PATH")) or _default_cache_path(),
+        cache_ttl_seconds=int((_clean(os.getenv("JIRA_CACHE_TTL_SECONDS")) or "3600")),
+        cache_max_entries=int((_clean(os.getenv("JIRA_CACHE_MAX_ENTRIES")) or "1000")),
     )
     _validate_settings(settings)
     return settings

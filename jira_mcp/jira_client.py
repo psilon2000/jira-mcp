@@ -11,6 +11,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .auth_state import JiraRuntimeAuthState
+from .cache import CacheHit, JiraCache
 from .config import (
     AUTH_MODE_AUTO,
     AUTH_MODE_BASIC,
@@ -38,6 +39,7 @@ class JiraClient:
         self._auth_state = auth_state
         self._recovery_service = recovery_service
         self._sessions: dict[str, Session] = {}
+        self._cache = JiraCache(settings)
 
     def auth_status(self) -> dict[str, Any]:
         response = self._request("GET", "/myself")
@@ -58,6 +60,12 @@ class JiraClient:
 
     def search_issues(self, jql: str, fields: list[str] | None, limit: int) -> dict[str, Any]:
         max_results = max(1, min(limit, 200))
+        cached = self._cache.get_search(jql=jql, fields=fields, limit=max_results)
+        if cached is not None:
+            result = dict(cached.payload)
+            result["cache"] = self._cache_info(cached, is_hit=True)
+            return result
+
         params: dict[str, Any] = {
             "jql": jql,
             "startAt": 0,
@@ -68,21 +76,44 @@ class JiraClient:
 
         response = self._request("GET", "/search", params=params)
         payload = response.json()
-        return {
+        result = {
             "status": "ok",
             "total": payload.get("total", 0),
             "count": len(payload.get("issues", []) or []),
             "issues": payload.get("issues", []),
         }
+        self._cache.put_search(jql=jql, fields=fields, limit=max_results, result=result)
+        if self._cache.enabled:
+            result["cache"] = self._cache_info(None, is_hit=False)
+        return result
 
     def get_issue(self, issue_key: str, fields: list[str] | None, expand: list[str] | None) -> dict[str, Any]:
+        cached = self._cache.get_issue(issue_key=issue_key, fields=fields, expand=expand)
+        if cached is not None:
+            return {"status": "ok", "issue": cached.payload, "cache": self._cache_info(cached, is_hit=True)}
+
+        stale = self._cache.get_issue(issue_key=issue_key, fields=fields, expand=expand, allow_stale=True)
+        if stale is not None and stale.updated and self._issue_updated_matches(issue_key, stale.updated):
+            self._cache.touch_issue(stale.key)
+            refreshed = self._cache.get_issue(issue_key=issue_key, fields=fields, expand=expand)
+            hit = refreshed or CacheHit(key=stale.key, payload=stale.payload, age_seconds=0, updated=stale.updated)
+            return {"status": "ok", "issue": stale.payload, "cache": self._cache_info(hit, is_hit=True, revalidated=True)}
+
         params: dict[str, Any] = {}
         if fields:
             params["fields"] = ",".join(fields)
         if expand:
             params["expand"] = ",".join(expand)
         response = self._request("GET", f"/issue/{issue_key}", params=params or None)
-        return {"status": "ok", "issue": response.json()}
+        issue = response.json()
+        self._cache.put_issue(issue_key=issue_key, fields=fields, expand=expand, issue=issue)
+        result = {"status": "ok", "issue": issue}
+        if self._cache.enabled:
+            result["cache"] = self._cache_info(None, is_hit=False)
+        return result
+
+    def search_cached_issues(self, query: str, limit: int) -> dict[str, Any]:
+        return self._cache.search_text(query=query, limit=limit)
 
     def list_board_sprints(
         self,
@@ -159,6 +190,7 @@ class JiraClient:
 
         response = self._request("POST", f"/issue/{issue_key}/worklog", json=body)
         payload = response.json()
+        self._invalidate_issue_cache(issue_key)
         return {
             "status": "ok",
             "issue_key": issue_key,
@@ -168,6 +200,7 @@ class JiraClient:
 
     def update_issue(self, issue_key: str, fields: dict[str, Any]) -> dict[str, Any]:
         self._request("PUT", f"/issue/{issue_key}", json={"fields": fields})
+        self._invalidate_issue_cache(issue_key)
         return {"status": "ok", "issue_key": issue_key, "updated_fields": sorted(fields.keys())}
 
     def create_issue(
@@ -188,6 +221,7 @@ class JiraClient:
 
         response = self._request("POST", "/issue", json={"fields": payload_fields})
         payload = response.json()
+        self._cache.clear_searches()
         return {
             "status": "ok",
             "issue_key": payload.get("key"),
@@ -221,15 +255,18 @@ class JiraClient:
                 "comment": [{"add": {"body": comment}}],
             }
         self._request("POST", f"/issue/{issue_key}/transitions", json=body)
+        self._invalidate_issue_cache(issue_key)
         return {"status": "ok", "issue_key": issue_key, "transition_id": str(transition_id)}
 
     def add_comment(self, issue_key: str, comment: str) -> dict[str, Any]:
         response = self._request("POST", f"/issue/{issue_key}/comment", json={"body": comment})
         payload = response.json()
+        self._invalidate_issue_cache(issue_key)
         return {"status": "ok", "issue_key": issue_key, "comment_id": payload.get("id")}
 
     def update_comment(self, issue_key: str, comment_id: str, comment: str) -> dict[str, Any]:
         self._request("PUT", f"/issue/{issue_key}/comment/{comment_id}", json={"body": comment})
+        self._invalidate_issue_cache(issue_key)
         return {"status": "ok", "issue_key": issue_key, "comment_id": str(comment_id)}
 
     def add_attachment(self, issue_key: str, file_path: str) -> dict[str, Any]:
@@ -242,6 +279,7 @@ class JiraClient:
             files={"file": (path.name, content)},
         )
         payload = response.json()
+        self._invalidate_issue_cache(issue_key)
         attachments = payload if isinstance(payload, list) else []
         attachment = attachments[0] if attachments else {}
         return {
@@ -255,6 +293,7 @@ class JiraClient:
 
     def add_issues_to_sprint(self, sprint_id: int, issue_keys: list[str]) -> dict[str, Any]:
         self._request_agile("POST", f"/sprint/{sprint_id}/issue", json={"issues": issue_keys})
+        self._invalidate_issue_cache(*issue_keys)
         return {
             "status": "ok",
             "sprint_id": sprint_id,
@@ -264,11 +303,37 @@ class JiraClient:
 
     def remove_issues_from_sprint(self, issue_keys: list[str]) -> dict[str, Any]:
         self._request_agile("POST", "/backlog/issue", json={"issues": issue_keys})
+        self._invalidate_issue_cache(*issue_keys)
         return {
             "status": "ok",
             "issue_keys": issue_keys,
             "issue_count": len(issue_keys),
         }
+
+    def _issue_updated_matches(self, issue_key: str, cached_updated: str) -> bool:
+        try:
+            response = self._request("GET", f"/issue/{issue_key}", params={"fields": "updated"})
+            payload = response.json()
+        except Exception:
+            return False
+        fields = payload.get("fields") if isinstance(payload, dict) else None
+        updated = fields.get("updated") if isinstance(fields, dict) else None
+        return updated == cached_updated
+
+    def _cache_info(self, cache_hit: CacheHit | None, is_hit: bool, revalidated: bool = False) -> dict[str, Any]:
+        info: dict[str, Any] = {
+            "enabled": self._cache.enabled,
+            "hit": is_hit,
+        }
+        if is_hit and cache_hit is not None:
+            info["age_seconds"] = cache_hit.age_seconds
+        if revalidated:
+            info["revalidated"] = True
+        return info
+
+    def _invalidate_issue_cache(self, *issue_keys: str) -> None:
+        for issue_key in issue_keys:
+            self._cache.invalidate_issue(issue_key)
 
     def _request(self, method: str, path: str, allow_browser_recovery: bool = True, **kwargs: Any) -> Response:
         url = f"{self._settings.rest_root.rstrip('/')}/{path.lstrip('/')}"

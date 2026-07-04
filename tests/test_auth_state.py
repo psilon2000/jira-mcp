@@ -34,6 +34,10 @@ def make_settings(storage_path: str, cookie: str | None = "JSESSIONID=configured
         browser_profile_dir="/tmp/profile",
         internal_cookie_storage_path=storage_path,
         browser_recovery_cooldown_minutes=60,
+        enable_cache=False,
+        cache_path=str(Path(storage_path).with_name("jira_cache.json")),
+        cache_ttl_seconds=3600,
+        cache_max_entries=1000,
     )
 
 

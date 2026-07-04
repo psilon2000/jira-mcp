@@ -24,6 +24,7 @@ class JiraTestServer(ThreadingHTTPServer):
         self.last_cookie_header: str | None = None
         self.last_json_body: dict | None = None
         self.last_uploaded_file: dict[str, str | int] | None = None
+        self.request_log: list[str] = []
         super().__init__(("127.0.0.1", 0), JiraHandler)
 
 
@@ -34,6 +35,7 @@ class JiraHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+        self.jira_server.request_log.append(self.path)
         cookie = self.headers.get("Cookie")
         auth = self.headers.get("Authorization")
         self.jira_server.last_cookie_header = cookie
@@ -55,6 +57,37 @@ class JiraHandler(BaseHTTPRequestHandler):
             if self.jira_server.scenario == "basic_with_cookies" and cookie == "JSESSIONID=session-cookie":
                 return self._json(200, {"transitions": [{"id": "1", "name": "Done"}]})
             return self._json(403, {"errorMessages": ["forbidden"]})
+        if path.endswith("/issue/TEAM-1") and self.jira_server.scenario == "issue_cache":
+            if "fields=updated" in self.path:
+                return self._json(200, {"key": "TEAM-1", "fields": {"updated": "2026-07-03T10:00:00.000+0000"}})
+            return self._json(
+                200,
+                {
+                    "key": "TEAM-1",
+                    "fields": {
+                        "summary": "Cacheable issue",
+                        "description": "Local buffer search target",
+                        "updated": "2026-07-03T10:00:00.000+0000",
+                    },
+                },
+            )
+        if path.endswith("/search") and self.jira_server.scenario == "search_cache":
+            return self._json(
+                200,
+                {
+                    "total": 1,
+                    "issues": [
+                        {
+                            "key": "TEAM-1",
+                            "fields": {
+                                "summary": "Cacheable issue",
+                                "description": "Local buffer search target",
+                                "updated": "2026-07-03T10:00:00.000+0000",
+                            },
+                        }
+                    ],
+                },
+            )
         if path.endswith("/issue/TEAM-1/attachments") and self.jira_server.scenario == "attachment_cookie_fallback":
             if cookie == "JSESSIONID=bad-cookie":
                 return self._json(403, {"errorMessages": ["bad cookie"]})
@@ -210,6 +243,10 @@ def make_settings(base_url: str, storage_path: str, **overrides: object) -> Sett
         "browser_profile_dir": str(Path(storage_path).with_name("profile")),
         "internal_cookie_storage_path": storage_path,
         "browser_recovery_cooldown_minutes": 1,
+        "enable_cache": False,
+        "cache_path": str(Path(storage_path).with_name("jira_cache.json")),
+        "cache_ttl_seconds": 3600,
+        "cache_max_entries": 1000,
     }
     values.update(overrides)
     return Settings(**values)
@@ -292,6 +329,86 @@ class JiraClientTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "recovery="):
                 client.auth_status()
+
+    def test_get_issue_uses_cache_hit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("issue_cache") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+                enable_cache=True,
+                cache_path=str(Path(tmpdir) / "jira_cache.json"),
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            first = client.get_issue(issue_key="TEAM-1", fields=None, expand=None)
+            second = client.get_issue(issue_key="TEAM-1", fields=None, expand=None)
+
+            self.assertEqual(first["cache"], {"enabled": True, "hit": False})
+            self.assertTrue(second["cache"]["hit"])
+            self.assertEqual(second["issue"]["fields"]["summary"], "Cacheable issue")
+            self.assertEqual(server.request_log.count("/rest/api/2/issue/TEAM-1"), 1)
+
+    def test_get_issue_revalidates_stale_cache_with_updated_field(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("issue_cache") as server:
+            cache_path = Path(tmpdir) / "jira_cache.json"
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+                enable_cache=True,
+                cache_path=str(cache_path),
+                cache_ttl_seconds=1,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            client.get_issue(issue_key="TEAM-1", fields=None, expand=None)
+            data = json.loads(cache_path.read_text())
+            for entry in data["issues"].values():
+                entry["saved_at"] = 0
+            cache_path.write_text(json.dumps(data))
+
+            result = client.get_issue(issue_key="TEAM-1", fields=None, expand=None)
+
+            self.assertTrue(result["cache"]["hit"])
+            self.assertTrue(result["cache"]["revalidated"])
+            self.assertEqual(server.request_log.count("/rest/api/2/issue/TEAM-1"), 1)
+            self.assertEqual(server.request_log.count("/rest/api/2/issue/TEAM-1?fields=updated"), 1)
+
+    def test_search_issues_and_cached_text_search_use_buffer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("search_cache") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+                enable_cache=True,
+                cache_path=str(Path(tmpdir) / "jira_cache.json"),
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            first = client.search_issues(
+                jql="project = TEAM",
+                fields=["summary", "description", "updated"],
+                limit=10,
+            )
+            second = client.search_issues(
+                jql="project = TEAM",
+                fields=["summary", "description", "updated"],
+                limit=10,
+            )
+            local = client.search_cached_issues(query="buffer target", limit=10)
+
+            self.assertEqual(first["cache"], {"enabled": True, "hit": False})
+            self.assertTrue(second["cache"]["hit"])
+            self.assertEqual(local["count"], 1)
+            self.assertEqual(local["issues"][0]["key"], "TEAM-1")
+            self.assertEqual(sum(1 for path in server.request_log if path.startswith("/rest/api/2/search?")), 1)
 
     def test_create_issue_posts_expected_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("create_issue") as server:

@@ -157,6 +157,14 @@ def jira_search_issues(jql: str, fields: list[str] | None = None, limit: int | N
 
 
 @mcp.tool()
+def jira_search_cached_issues(query: str, limit: int | None = None) -> dict[str, Any]:
+    """Text search over locally cached Jira issue payloads only."""
+    if not query.strip():
+        raise ValueError("query is required")
+    return client.search_cached_issues(query=query.strip(), limit=limit or settings.default_limit)
+
+
+@mcp.tool()
 def jira_get_issue(
     issue_key: str,
     fields: list[str] | None = None,

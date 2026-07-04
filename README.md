@@ -5,6 +5,7 @@ MCP server (Python) for Jira read/write operations used in Telegram bot e2e test
 ## Features
 
 - Search/read issues (`jira_search_issues`, `jira_get_issue`)
+- Text search over the local Jira cache (`jira_search_cached_issues`)
 - List board sprints (`jira_list_board_sprints`)
 - Check available transitions (`jira_list_transitions`)
 - Add worklog (`jira_add_worklog`)
@@ -47,6 +48,10 @@ Recommended auth setup:
 - `JIRA_WRITE_SPRINT_WHITELIST=456,457`
 - `JIRA_ENABLE_CREATE_ISSUE=false`
 - `JIRA_CREATE_ISSUE_PROJECT_WHITELIST=TEAM`
+- `JIRA_ENABLE_CACHE=false`
+- `JIRA_CACHE_PATH=.state/jira_cache.json`
+- `JIRA_CACHE_TTL_SECONDS=3600`
+- `JIRA_CACHE_MAX_ENTRIES=1000`
 
 Auth modes:
 - `cookie` - sends raw `JIRA_COOKIE` header.
@@ -61,6 +66,12 @@ Browser recovery env:
 - `JIRA_BROWSER_PROFILE_DIR=jira_browser_profile`
 - `JIRA_INTERNAL_COOKIE_STORAGE_PATH=.state/jira_cookie.json`
 - `JIRA_BROWSER_RECOVERY_COOLDOWN_MINUTES=60`
+
+Cache env:
+- `JIRA_ENABLE_CACHE=false`
+- `JIRA_CACHE_PATH=.state/jira_cache.json`
+- `JIRA_CACHE_TTL_SECONDS=3600`
+- `JIRA_CACHE_MAX_ENTRIES=1000`
 
 Create issue env:
 - `JIRA_ENABLE_CREATE_ISSUE=false`
@@ -87,6 +98,14 @@ Browser recovery notes:
 - If Playwright is not installed, normal auth still works and recovery returns a clear error.
 - To clear stale recovered cookie manually, remove `.state/jira_cookie.json` and restart the server.
 
+Cache notes:
+- Status: implemented behind `JIRA_ENABLE_CACHE=true`.
+- Cache is opt-in and affects only read tools.
+- `jira_get_issue` and `jira_search_issues` use read-through cache when `JIRA_ENABLE_CACHE=true`.
+- Stale cached issues with a stored `fields.updated` value are revalidated with a lightweight `fields=updated` request before downloading the full issue.
+- Write tools invalidate affected issue entries and clear cached search results after successful Jira writes.
+- `jira_search_cached_issues` searches only locally cached issue payloads and never calls Jira.
+
 ## Run
 
 ```bash
@@ -105,6 +124,7 @@ python -m unittest discover -s tests
 
 - `jira_auth_status()`
 - `jira_search_issues(jql="project = TEAM ORDER BY updated DESC", limit=20)`
+- `jira_search_cached_issues(query="release notes", limit=20)`
 - `jira_get_issue(issue_key="TEAM-123")`
 - `jira_list_board_sprints(board_id=865, state="active")`
 - `jira_get_current_board_sprint(board_id=865)`
