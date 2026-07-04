@@ -143,6 +143,63 @@ class JiraClient:
             "sprints": values,
         }
 
+    def get_sprint(self, sprint_id: int) -> dict[str, Any]:
+        response = self._request_agile("GET", f"/sprint/{sprint_id}")
+        return {"status": "ok", "sprint_id": sprint_id, "sprint": response.json()}
+
+    def create_sprint(
+        self,
+        board_id: int,
+        name: str,
+        start_date: str | None,
+        end_date: str | None,
+        goal: str | None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "name": name,
+            "originBoardId": board_id,
+        }
+        if start_date:
+            body["startDate"] = start_date
+        if end_date:
+            body["endDate"] = end_date
+        if goal:
+            body["goal"] = goal
+
+        response = self._request_agile("POST", "/sprint", json=body)
+        sprint = response.json()
+        return {
+            "status": "ok",
+            "board_id": board_id,
+            "sprint_id": sprint.get("id"),
+            "sprint": sprint,
+        }
+
+    def update_sprint(
+        self,
+        sprint_id: int,
+        name: str | None = None,
+        state: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        goal: str | None = None,
+    ) -> dict[str, Any]:
+        current = self.get_sprint(sprint_id=sprint_id)["sprint"]
+        body = self._sprint_update_payload(current)
+        if name is not None:
+            body["name"] = name
+        if state is not None:
+            body["state"] = state
+        if start_date is not None:
+            body["startDate"] = start_date
+        if end_date is not None:
+            body["endDate"] = end_date
+        if goal is not None:
+            body["goal"] = goal
+
+        response = self._request_agile("PUT", f"/sprint/{sprint_id}", json=body)
+        return {"status": "ok", "sprint_id": sprint_id, "sprint": response.json()}
+
     def get_current_board_sprint(self, board_id: int) -> dict[str, Any]:
         active = self.list_board_sprints(board_id=board_id, state="active", limit=1, start_at=0)
         active_sprints = active.get("sprints", []) or []
@@ -264,8 +321,58 @@ class JiraClient:
         self._invalidate_issue_cache(issue_key)
         return {"status": "ok", "issue_key": issue_key, "comment_id": payload.get("id")}
 
+    def link_issues(
+        self,
+        source_issue_key: str,
+        target_issue_key: str,
+        link_type: str,
+        comment: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "type": {"name": link_type},
+            "outwardIssue": {"key": target_issue_key},
+            "inwardIssue": {"key": source_issue_key},
+        }
+        if comment:
+            body["comment"] = {"body": comment}
+        self._request("POST", "/issueLink", json=body)
+        self._invalidate_issue_cache(source_issue_key, target_issue_key)
+        return {
+            "status": "ok",
+            "source_issue_key": source_issue_key,
+            "target_issue_key": target_issue_key,
+            "link_type": link_type,
+        }
+
+    def delete_issue_link(self, link_id: str, source_issue_key: str, target_issue_key: str) -> dict[str, Any]:
+        response = self._request("GET", f"/issueLink/{link_id}")
+        link = response.json()
+        actual_issue_keys = {
+            str((link.get(side) or {}).get("key") or "").strip().upper()
+            for side in ("inwardIssue", "outwardIssue")
+        }
+        expected_issue_keys = {source_issue_key.upper(), target_issue_key.upper()}
+        if actual_issue_keys != expected_issue_keys:
+            raise ValueError(
+                f"issue link '{link_id}' connects {sorted(actual_issue_keys)}, expected {sorted(expected_issue_keys)}"
+            )
+        self._request("DELETE", f"/issueLink/{link_id}")
+        self._invalidate_issue_cache(source_issue_key, target_issue_key)
+        return {
+            "status": "ok",
+            "link_id": str(link_id),
+            "source_issue_key": source_issue_key,
+            "target_issue_key": target_issue_key,
+            "link": link,
+        }
+
     def update_comment(self, issue_key: str, comment_id: str, comment: str) -> dict[str, Any]:
         self._request("PUT", f"/issue/{issue_key}/comment/{comment_id}", json={"body": comment})
+        self._invalidate_issue_cache(issue_key)
+        return {"status": "ok", "issue_key": issue_key, "comment_id": str(comment_id)}
+
+    def delete_comment(self, issue_key: str, comment_id: str) -> dict[str, Any]:
+        self._request("DELETE", f"/issue/{issue_key}/comment/{comment_id}")
         self._invalidate_issue_cache(issue_key)
         return {"status": "ok", "issue_key": issue_key, "comment_id": str(comment_id)}
 
@@ -291,6 +398,58 @@ class JiraClient:
             "attachment": attachment,
         }
 
+    def download_attachment(
+        self,
+        attachment_id: str | None,
+        issue_key: str | None,
+        filename: str | None,
+        output_dir: str,
+        overwrite: bool,
+    ) -> dict[str, Any]:
+        attachment = self._resolve_attachment(attachment_id=attachment_id, issue_key=issue_key, filename=filename)
+        content_url = str(attachment.get("content") or "").strip()
+        if not content_url:
+            raise ValueError("attachment content URL is missing")
+
+        output_path = Path(output_dir).expanduser().resolve()
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        safe_name = Path(str(attachment.get("filename") or attachment.get("id") or "attachment")).name or "attachment"
+        target_path = output_path / safe_name
+        if target_path.exists() and not overwrite:
+            raise ValueError(f"output file already exists: {target_path}")
+
+        response = self._request_download_url(content_url, f"attachment/{attachment.get('id')}")
+        target_path.write_bytes(response.content)
+        return {
+            "status": "ok",
+            "attachment_id": str(attachment.get("id") or ""),
+            "filename": safe_name,
+            "saved_path": str(target_path),
+            "size": len(response.content),
+            "mime_type": response.headers.get("Content-Type") or attachment.get("mimeType"),
+            "attachment": attachment,
+        }
+
+    def search_users(self, query: str, max_results: int = 20) -> dict[str, Any]:
+        max_results = max(1, min(max_results, 200))
+        response = self._request("GET", "/user/search", params={"username": query, "maxResults": max_results})
+        users = response.json()
+        return {
+            "status": "ok",
+            "count": len(users),
+            "users": [
+                {
+                    "key": u.get("name"),
+                    "account_id": u.get("key"),
+                    "display_name": u.get("displayName"),
+                    "email": u.get("emailAddress"),
+                    "active": u.get("active", False),
+                }
+                for u in (users or [])
+            ],
+        }
+
     def add_issues_to_sprint(self, sprint_id: int, issue_keys: list[str]) -> dict[str, Any]:
         self._request_agile("POST", f"/sprint/{sprint_id}/issue", json={"issues": issue_keys})
         self._invalidate_issue_cache(*issue_keys)
@@ -309,6 +468,15 @@ class JiraClient:
             "issue_keys": issue_keys,
             "issue_count": len(issue_keys),
         }
+
+    @staticmethod
+    def _sprint_update_payload(sprint: dict[str, Any]) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for key in ("id", "self", "state", "name", "startDate", "endDate", "completeDate", "originBoardId", "goal"):
+            value = sprint.get(key)
+            if value is not None:
+                payload[key] = value
+        return payload
 
     def _issue_updated_matches(self, issue_key: str, cached_updated: str) -> bool:
         try:
@@ -335,6 +503,35 @@ class JiraClient:
         for issue_key in issue_keys:
             self._cache.invalidate_issue(issue_key)
 
+    def _resolve_attachment(
+        self,
+        attachment_id: str | None,
+        issue_key: str | None,
+        filename: str | None,
+    ) -> dict[str, Any]:
+        attachment_id_value = (attachment_id or "").strip()
+        if attachment_id_value:
+            response = self._request("GET", f"/attachment/{attachment_id_value}")
+            payload = response.json()
+            if isinstance(payload, dict):
+                payload.setdefault("id", attachment_id_value)
+                return payload
+            return {}
+
+        issue_key_value = (issue_key or "").strip()
+        filename_value = (filename or "").strip()
+        if not issue_key_value or not filename_value:
+            raise ValueError("attachment_id or issue_key+filename is required")
+
+        issue = self.get_issue(issue_key=issue_key_value, fields=["attachment"], expand=None)["issue"]
+        attachments = ((issue.get("fields") or {}).get("attachment") or []) if isinstance(issue, dict) else []
+        matches = [item for item in attachments if str(item.get("filename") or "") == filename_value]
+        if not matches:
+            raise ValueError(f"attachment '{filename_value}' not found in issue '{issue_key_value}'")
+        if len(matches) > 1:
+            raise ValueError(f"attachment filename is not unique in issue '{issue_key_value}': {filename_value}")
+        return matches[0]
+
     def _request(self, method: str, path: str, allow_browser_recovery: bool = True, **kwargs: Any) -> Response:
         url = f"{self._settings.rest_root.rstrip('/')}/{path.lstrip('/')}"
         return self._request_absolute_url(method, url, path, allow_browser_recovery=allow_browser_recovery, **kwargs)
@@ -342,6 +539,54 @@ class JiraClient:
     def _request_agile(self, method: str, path: str, allow_browser_recovery: bool = True, **kwargs: Any) -> Response:
         url = f"{self._settings.agile_rest_root.rstrip('/')}/{path.lstrip('/')}"
         return self._request_absolute_url(method, url, path, allow_browser_recovery=allow_browser_recovery, **kwargs)
+
+    def _request_download_url(self, url: str, path: str, allow_browser_recovery: bool = True) -> Response:
+        attempts = self._build_auth_attempts()
+        if not attempts:
+            raise RuntimeError("Jira auth has no usable credentials")
+
+        tried: list[str] = []
+        for attempt in attempts:
+            tried.append(attempt.name)
+            response = self._send_with_attempt(
+                attempt,
+                "GET",
+                url,
+                headers={"Accept": "*/*"},
+                allow_redirects=False,
+            )
+            if self._is_auth_failure(response) or self._is_login_redirect(response):
+                if attempt.name == AUTH_MODE_COOKIE and self._auth_state.mark_active_cookie_invalid():
+                    retried = f"{attempt.name}(configured_env)"
+                    tried.append(retried)
+                    fallback_response = self._send_with_attempt(
+                        attempt,
+                        "GET",
+                        url,
+                        headers={"Accept": "*/*"},
+                        allow_redirects=False,
+                    )
+                    if fallback_response.ok and not fallback_response.is_redirect:
+                        return fallback_response
+                    if not self._is_auth_failure(fallback_response) and not self._is_login_redirect(fallback_response):
+                        self._raise_for_response("GET", path, fallback_response)
+                continue
+            if response.is_redirect:
+                self._raise_for_response("GET", path, response)
+            if response.ok:
+                return response
+            self._raise_for_response("GET", path, response)
+
+        if allow_browser_recovery and self._recovery_service is not None:
+            recovery = self._recovery_service.try_recover(f"Jira auth failed after attempts: {' -> '.join(tried)}")
+            if recovery.is_success:
+                self._reset_sessions()
+                return self._request_download_url(url, path, allow_browser_recovery=False)
+            raise RuntimeError(
+                f"Jira auth failed after attempts: {' -> '.join(tried)}; recovery={recovery.details}"
+            )
+
+        raise RuntimeError(f"Jira auth failed after attempts: {' -> '.join(tried)}")
 
     def _request_absolute_url(
         self,
@@ -463,6 +708,13 @@ class JiraClient:
     @staticmethod
     def _is_auth_failure(response: Response) -> bool:
         return response.status_code in {401, 403}
+
+    @staticmethod
+    def _is_login_redirect(response: Response) -> bool:
+        if not response.is_redirect:
+            return False
+        location = response.headers.get("Location", "").lower()
+        return "login" in location or "permissionviolation" in location
 
     @staticmethod
     def _raise_for_response(method: str, path: str, response: Response) -> None:

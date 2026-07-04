@@ -185,6 +185,45 @@ class ServerToolTests(unittest.TestCase):
             comment="Link frontend task",
         )
 
+    def test_delete_issue_link_requires_confirm(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "confirm=true"):
+                server.jira_delete_issue_link(
+                    link_id="12345",
+                    source_issue_key="AQ-1",
+                    target_issue_key="AQ-2",
+                )
+
+    def test_delete_issue_link_requires_link_id(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "link_id is required"):
+                server.jira_delete_issue_link(
+                    link_id="   ",
+                    source_issue_key="AQ-1",
+                    target_issue_key="AQ-2",
+                    confirm=True,
+                )
+
+    def test_delete_issue_link_calls_client(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ", "PV"))):
+            with patch.object(server.client, "delete_issue_link", return_value={"status": "ok"}) as delete_issue_link:
+                result = server.jira_delete_issue_link(
+                    link_id=" 12345 ",
+                    source_issue_key=" aq-1 ",
+                    target_issue_key=" pv-1 ",
+                    confirm=True,
+                )
+
+        self.assertEqual(result, {"status": "ok"})
+        delete_issue_link.assert_called_once_with(
+            link_id="12345",
+            source_issue_key="AQ-1",
+            target_issue_key="PV-1",
+        )
+
     def test_update_comment_requires_non_empty_comment(self) -> None:
         server = self._load_server_module()
         with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
@@ -199,6 +238,36 @@ class ServerToolTests(unittest.TestCase):
 
         self.assertEqual(result, {"status": "ok", "comment_id": "123"})
         update_comment.assert_called_once_with(issue_key="AQ-1", comment_id="123", comment="Updated")
+
+    def test_delete_comment_requires_confirm(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "confirm=true"):
+                server.jira_delete_comment(
+                    issue_key="AQ-1",
+                    comment_id="123",
+                    comment_confirm="DELETE_COMMENT AQ-1 123",
+                )
+
+    def test_delete_comment_requires_separate_confirmation(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "comment_confirm must equal 'DELETE_COMMENT AQ-1 123'"):
+                server.jira_delete_comment(issue_key="AQ-1", comment_id="123", confirm=True)
+
+    def test_delete_comment_calls_client(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with patch.object(server.client, "delete_comment", return_value={"status": "ok", "comment_id": "123"}) as delete_comment:
+                result = server.jira_delete_comment(
+                    issue_key=" aq-1 ",
+                    comment_id=" 123 ",
+                    comment_confirm="DELETE_COMMENT AQ-1 123",
+                    confirm=True,
+                )
+
+        self.assertEqual(result, {"status": "ok", "comment_id": "123"})
+        delete_comment.assert_called_once_with(issue_key="AQ-1", comment_id="123")
 
     def test_add_issues_to_sprint_requires_confirm(self) -> None:
         server = self._load_server_module()
@@ -224,11 +293,63 @@ class ServerToolTests(unittest.TestCase):
         self.assertEqual(result, {"status": "ok", "attachment_id": "1"})
         add_attachment.assert_called_once_with(issue_key="AQ-1", file_path=str(file_path.resolve()))
 
+    def test_download_attachment_requires_selector(self) -> None:
+        server = self._load_server_module()
+        with self.assertRaisesRegex(ValueError, r"attachment_id or issue_key\+filename"):
+            server.jira_download_attachment()
+
+    def test_download_attachment_calls_client_by_id(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server.client, "download_attachment", return_value={"status": "ok", "saved_path": "/tmp/opencode/a.sql"}) as download_attachment:
+            result = server.jira_download_attachment(
+                attachment_id=" 20001 ",
+                output_dir=" /tmp/opencode ",
+                overwrite=True,
+            )
+
+        self.assertEqual(result, {"status": "ok", "saved_path": "/tmp/opencode/a.sql"})
+        download_attachment.assert_called_once_with(
+            attachment_id="20001",
+            issue_key=None,
+            filename=None,
+            output_dir="/tmp/opencode",
+            overwrite=True,
+        )
+
+    def test_download_attachment_calls_client_by_filename(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server.client, "download_attachment", return_value={"status": "ok"}) as download_attachment:
+            result = server.jira_download_attachment(
+                issue_key=" aq-1 ",
+                filename=" scripts.sql ",
+                output_dir="/tmp/opencode",
+            )
+
+        self.assertEqual(result, {"status": "ok"})
+        download_attachment.assert_called_once_with(
+            attachment_id=None,
+            issue_key="AQ-1",
+            filename="scripts.sql",
+            output_dir="/tmp/opencode",
+            overwrite=False,
+        )
+
     def test_add_issues_to_sprint_rejects_unapproved_sprint(self) -> None:
         server = self._load_server_module()
         with patch.object(server, "settings", replace(server.settings, write_sprint_whitelist=(123,), write_project_whitelist=("AQ",))):
             with self.assertRaisesRegex(ValueError, "not allowed"):
                 server.jira_add_issues_to_sprint(sprint_id=999, issue_keys=["AQ-1"], confirm=True)
+
+    def test_add_issues_to_sprint_allows_board_whitelist(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_board_whitelist=(865,), write_project_whitelist=("AQ",))):
+            with patch.object(server.client, "get_sprint", return_value={"status": "ok", "sprint": {"id": 316, "originBoardId": 865}}) as get_sprint:
+                with patch.object(server.client, "add_issues_to_sprint", return_value={"status": "ok"}) as add_issues:
+                    result = server.jira_add_issues_to_sprint(sprint_id=316, issue_keys=["AQ-1"], confirm=True)
+
+        self.assertEqual(result, {"status": "ok"})
+        get_sprint.assert_called_once_with(sprint_id=316)
+        add_issues.assert_called_once_with(sprint_id=316, issue_keys=["AQ-1"])
 
     def test_add_issues_to_sprint_calls_client(self) -> None:
         server = self._load_server_module()
@@ -261,6 +382,84 @@ class ServerToolTests(unittest.TestCase):
 
         self.assertEqual(result["sprint_id"], 293)
         get_current.assert_called_once_with(board_id=865)
+
+    def test_create_sprint_requires_confirm(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_board_whitelist=(865,))):
+            with self.assertRaisesRegex(ValueError, "confirm=true"):
+                server.jira_create_sprint(board_id=865, name="SCRUM Sprint 68")
+
+    def test_create_sprint_rejects_unapproved_board(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_board_whitelist=(865,))):
+            with self.assertRaisesRegex(ValueError, "not allowed"):
+                server.jira_create_sprint(board_id=999, name="SCRUM Sprint 68", confirm=True)
+
+    def test_create_sprint_calls_client(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_board_whitelist=(865,))):
+            with patch.object(server.client, "create_sprint", return_value={"status": "ok", "sprint_id": 456}) as create_sprint:
+                result = server.jira_create_sprint(
+                    board_id=865,
+                    name=" SCRUM Sprint 68 ",
+                    start_date=" 2026-06-01T09:00:00.000+03:00 ",
+                    end_date="2026-06-12T21:00:00.000+03:00",
+                    goal=" Sprint goal ",
+                    confirm=True,
+                )
+
+        self.assertEqual(result, {"status": "ok", "sprint_id": 456})
+        create_sprint.assert_called_once_with(
+            board_id=865,
+            name="SCRUM Sprint 68",
+            start_date="2026-06-01T09:00:00.000+03:00",
+            end_date="2026-06-12T21:00:00.000+03:00",
+            goal="Sprint goal",
+        )
+
+    def test_update_sprint_requires_field(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_sprint_whitelist=(456,))):
+            with self.assertRaisesRegex(ValueError, "at least one"):
+                server.jira_update_sprint(sprint_id=456, confirm=True)
+
+    def test_update_sprint_rejects_unknown_state(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_sprint_whitelist=(456,))):
+            with self.assertRaisesRegex(ValueError, "state must be"):
+                server.jira_update_sprint(sprint_id=456, state="running", confirm=True)
+
+    def test_start_sprint_calls_client(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_sprint_whitelist=(456,))):
+            with patch.object(server.client, "update_sprint", return_value={"status": "ok"}) as update_sprint:
+                result = server.jira_start_sprint(
+                    sprint_id=456,
+                    start_date="2026-06-01T09:00:00.000+03:00",
+                    end_date="2026-06-12T21:00:00.000+03:00",
+                    confirm=True,
+                )
+
+        self.assertEqual(result, {"status": "ok"})
+        update_sprint.assert_called_once_with(
+            sprint_id=456,
+            name=None,
+            state="active",
+            start_date="2026-06-01T09:00:00.000+03:00",
+            end_date="2026-06-12T21:00:00.000+03:00",
+            goal=None,
+        )
+
+    def test_close_sprint_allows_board_whitelist(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_board_whitelist=(865,))):
+            with patch.object(server.client, "get_sprint", return_value={"status": "ok", "sprint": {"id": 456, "originBoardId": 865}}) as get_sprint:
+                with patch.object(server.client, "update_sprint", return_value={"status": "ok"}) as update_sprint:
+                    result = server.jira_close_sprint(sprint_id=456, confirm=True)
+
+        self.assertEqual(result, {"status": "ok"})
+        get_sprint.assert_called_once_with(sprint_id=456)
+        update_sprint.assert_called_once_with(sprint_id=456, state="closed")
 
     def test_add_issues_to_current_board_sprint_calls_client(self) -> None:
         server = self._load_server_module()

@@ -7,6 +7,7 @@ MCP server (Python) for Jira read/write operations used in Telegram bot e2e test
 - Search/read issues (`jira_search_issues`, `jira_get_issue`)
 - Text search over the local Jira cache (`jira_search_cached_issues`)
 - List board sprints (`jira_list_board_sprints`)
+- Create/update/start/close sprints (`jira_create_sprint`, `jira_update_sprint`, `jira_start_sprint`, `jira_close_sprint`)
 - Check available transitions (`jira_list_transitions`)
 - Add worklog (`jira_add_worklog`)
 - Create issue (`jira_create_issue`)
@@ -15,7 +16,10 @@ MCP server (Python) for Jira read/write operations used in Telegram bot e2e test
 - Transition issue (`jira_transition_issue`)
 - Add comment (`jira_add_comment`)
 - Update comment (`jira_update_comment`)
+- Delete comment (`jira_delete_comment`)
 - Add attachment (`jira_add_attachment`)
+- Download attachment (`jira_download_attachment`)
+- Delete issue link (`jira_delete_issue_link`)
 - Add issues to sprint (`jira_add_issues_to_sprint`)
 - Remove issues from sprint (`jira_remove_issues_from_sprint`)
 - Auth check (`jira_auth_status`)
@@ -23,7 +27,9 @@ MCP server (Python) for Jira read/write operations used in Telegram bot e2e test
 Write safety:
 - `confirm=true` is required for all write tools.
 - `jira_add_comment` additionally requires a separate explicit confirmation string: `comment_confirm="ADD_COMMENT <ISSUE-KEY>"`.
+- `jira_delete_comment` additionally requires a separate explicit confirmation string: `comment_confirm="DELETE_COMMENT <ISSUE-KEY> <COMMENT-ID>"`.
 - Write is allowed only for issue/project whitelist from env.
+- Sprint management is allowed only for sprint or board whitelist from env.
 - Issue creation has a separate feature flag and is restricted to one configured project.
 
 ## Setup
@@ -46,6 +52,7 @@ Recommended auth setup:
 - `JIRA_WRITE_PROJECT_WHITELIST=TEAM`
 - `JIRA_WRITE_ISSUE_WHITELIST=TEAM-123`
 - `JIRA_WRITE_SPRINT_WHITELIST=456,457`
+- `JIRA_WRITE_BOARD_WHITELIST=865`
 - `JIRA_ENABLE_CREATE_ISSUE=false`
 - `JIRA_CREATE_ISSUE_PROJECT_WHITELIST=TEAM`
 - `JIRA_ENABLE_CACHE=false`
@@ -79,12 +86,15 @@ Create issue env:
 
 Sprint write env:
 - `JIRA_WRITE_SPRINT_WHITELIST=456,457`
+- `JIRA_WRITE_BOARD_WHITELIST=865`
 
 Sprint write notes:
 - `jira_add_issues_to_sprint` and `jira_remove_issues_from_sprint` work only with `confirm=true`.
 - Both tools require issue write permission from `JIRA_WRITE_PROJECT_WHITELIST` or `JIRA_WRITE_ISSUE_WHITELIST`.
-- Both tools also require `sprint_id` to be included in `JIRA_WRITE_SPRINT_WHITELIST`.
+- Both tools also require either `sprint_id` in `JIRA_WRITE_SPRINT_WHITELIST` or the sprint's `originBoardId` in `JIRA_WRITE_BOARD_WHITELIST`.
 - `jira_remove_issues_from_sprint` moves issues to backlog via Jira Agile API.
+- `jira_create_sprint` requires `board_id` to be included in `JIRA_WRITE_BOARD_WHITELIST`.
+- `jira_update_sprint`, `jira_start_sprint`, and `jira_close_sprint` require either `sprint_id` in `JIRA_WRITE_SPRINT_WHITELIST` or the sprint's `originBoardId` in `JIRA_WRITE_BOARD_WHITELIST`.
 
 Create issue notes:
 - `jira_create_issue` works only with `confirm=true`.
@@ -128,6 +138,9 @@ python -m unittest discover -s tests
 - `jira_get_issue(issue_key="TEAM-123")`
 - `jira_list_board_sprints(board_id=865, state="active")`
 - `jira_get_current_board_sprint(board_id=865)`
+- `jira_create_sprint(board_id=865, name="SCRUM Спринт 68", start_date="2026-06-01T09:00:00.000+03:00", end_date="2026-06-12T21:00:00.000+03:00", goal="ЦР для физлиц, срочные задачи ИЭ, рекурренты СБП", confirm=True)`
+- `jira_start_sprint(sprint_id=456, start_date="2026-06-01T09:00:00.000+03:00", end_date="2026-06-12T21:00:00.000+03:00", confirm=True)`
+- `jira_close_sprint(sprint_id=312, confirm=True)`
 - `jira_create_issue(project_key="TEAM", summary="Prepare release notes", confirm=True)`
 - `jira_create_issue(project_key="TEAM", summary="Prepare release notes", issue_type="Bug", description="Reported by QA", fields={"priority": {"name": "High"}}, confirm=True)`
 - `jira_create_issue(project_key="AQ", summary="Prepare AQ task", issue_type="10006", fields={"assignee": {"name": "<login>"}, "components": [{"id": "18340"}], "customfield_10901": {"id": "10403"}}, confirm=True)`
@@ -140,7 +153,11 @@ python -m unittest discover -s tests
 - `jira_transition_issue(issue_key="TEAM-123", transition_id="31", confirm=True)`
 - `jira_add_comment(issue_key="TEAM-123", comment="Need DBA check", comment_confirm="ADD_COMMENT TEAM-123", confirm=True)`
 - `jira_update_comment(issue_key="TEAM-123", comment_id="456", comment="Updated text", confirm=True)`
+- `jira_delete_comment(issue_key="TEAM-123", comment_id="456", comment_confirm="DELETE_COMMENT TEAM-123 456", confirm=True)`
 - `jira_add_attachment(issue_key="TEAM-123", file_path="/tmp/report.txt", confirm=True)`
+- `jira_download_attachment(attachment_id="20001", output_dir="/tmp/opencode")`
+- `jira_download_attachment(issue_key="TEAM-123", filename="report.txt", output_dir="/tmp/opencode")`
+- `jira_delete_issue_link(link_id="12345", source_issue_key="TEAM-123", target_issue_key="TEAM-124", confirm=True)`
 - `jira_add_issues_to_sprint(sprint_id=456, issue_keys=["AQ-123", "AQ-124"], confirm=True)`
 - `jira_remove_issues_from_sprint(sprint_id=456, issue_keys=["AQ-123"], confirm=True)`
 - `jira_add_issues_to_current_board_sprint(board_id=865, issue_keys=["AQ-123"], confirm=True)`

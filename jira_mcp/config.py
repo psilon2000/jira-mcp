@@ -36,6 +36,7 @@ class Settings:
     write_project_whitelist: tuple[str, ...]
     write_issue_whitelist: tuple[str, ...]
     write_sprint_whitelist: tuple[int, ...]
+    write_board_whitelist: tuple[int, ...]
     enable_create_issue: bool
     create_issue_project_whitelist: tuple[str, ...]
     enable_browser_recovery: bool
@@ -197,6 +198,7 @@ def load_settings() -> Settings:
         write_project_whitelist=_csv("JIRA_WRITE_PROJECT_WHITELIST"),
         write_issue_whitelist=_csv("JIRA_WRITE_ISSUE_WHITELIST"),
         write_sprint_whitelist=_csv_int("JIRA_WRITE_SPRINT_WHITELIST"),
+        write_board_whitelist=_csv_int("JIRA_WRITE_BOARD_WHITELIST"),
         enable_create_issue=_flag("JIRA_ENABLE_CREATE_ISSUE", default=False),
         create_issue_project_whitelist=_create_issue_project_whitelist(),
         enable_browser_recovery=_flag("JIRA_ENABLE_BROWSER_RECOVERY", default=False),

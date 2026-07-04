@@ -53,6 +53,12 @@ def _expected_comment_confirmation(issue_key: str) -> str:
     return f"ADD_COMMENT {issue}"
 
 
+def _expected_delete_comment_confirmation(issue_key: str, comment_id: str) -> str:
+    issue = (issue_key or "").strip().upper()
+    comment = str(comment_id or "").strip()
+    return f"DELETE_COMMENT {issue} {comment}"
+
+
 def _ensure_comment_write_allowed(issue_key: str, confirm: bool, comment_confirm: str) -> str:
     _ensure_write_allowed(issue_key, confirm)
     issue = issue_key.strip().upper()
@@ -66,21 +72,76 @@ def _ensure_comment_write_allowed(issue_key: str, confirm: bool, comment_confirm
     return issue
 
 
+def _ensure_delete_comment_allowed(issue_key: str, comment_id: str, confirm: bool, comment_confirm: str) -> tuple[str, str]:
+    _ensure_write_allowed(issue_key, confirm)
+    issue = issue_key.strip().upper()
+    comment = str(comment_id).strip()
+    if not comment:
+        raise ValueError("comment_id is required")
+    expected = _expected_delete_comment_confirmation(issue, comment)
+    actual = (comment_confirm or "").strip().upper()
+    if actual != expected:
+        raise ValueError(
+            "jira_delete_comment requires separate explicit confirmation: "
+            f"comment_confirm must equal '{expected}'"
+        )
+    return issue, comment
+
+
 def _ensure_sprint_write_allowed(sprint_id: int, confirm: bool) -> int:
     if not confirm:
         raise ValueError("write requires explicit confirm=true")
 
+    sprint = _normalize_sprint_id(sprint_id)
+    if sprint not in settings.write_sprint_whitelist:
+        if not settings.write_sprint_whitelist and not settings.write_board_whitelist:
+            raise ValueError("write sprint whitelist is empty: set JIRA_WRITE_SPRINT_WHITELIST or JIRA_WRITE_BOARD_WHITELIST")
+        if settings.write_board_whitelist:
+            sprint_payload = client.get_sprint(sprint_id=sprint).get("sprint") or {}
+            board_id = int(sprint_payload.get("originBoardId") or 0)
+            if board_id in settings.write_board_whitelist:
+                return sprint
+        raise ValueError(f"sprint '{sprint}' is not allowed by sprint or board whitelist")
+
+    return sprint
+
+
+def _normalize_sprint_id(sprint_id: int) -> int:
     sprint = int(sprint_id)
     if sprint <= 0:
         raise ValueError("sprint_id must be a positive integer")
-
-    if not settings.write_sprint_whitelist:
-        raise ValueError("write sprint whitelist is empty: set JIRA_WRITE_SPRINT_WHITELIST")
-
-    if sprint not in settings.write_sprint_whitelist:
-        raise ValueError(f"sprint '{sprint}' is not allowed by sprint whitelist")
-
     return sprint
+
+
+def _ensure_board_write_allowed(board_id: int, confirm: bool) -> int:
+    if not confirm:
+        raise ValueError("write requires explicit confirm=true")
+
+    board = _normalize_board_id(board_id)
+    if not settings.write_board_whitelist:
+        raise ValueError("write board whitelist is empty: set JIRA_WRITE_BOARD_WHITELIST")
+
+    if board not in settings.write_board_whitelist:
+        raise ValueError(f"board '{board}' is not allowed by board whitelist")
+
+    return board
+
+
+def _ensure_sprint_manage_allowed(sprint_id: int, confirm: bool) -> int:
+    if not confirm:
+        raise ValueError("write requires explicit confirm=true")
+
+    sprint = _normalize_sprint_id(sprint_id)
+    if sprint in settings.write_sprint_whitelist:
+        return sprint
+
+    if settings.write_board_whitelist:
+        sprint_payload = client.get_sprint(sprint_id=sprint).get("sprint") or {}
+        board_id = int(sprint_payload.get("originBoardId") or 0)
+        if board_id in settings.write_board_whitelist:
+            return sprint
+
+    raise ValueError(f"sprint '{sprint}' is not allowed by sprint or board whitelist")
 
 
 def _normalize_issue_keys(issue_keys: list[str]) -> list[str]:
@@ -100,6 +161,24 @@ def _normalize_board_id(board_id: int) -> int:
     if board <= 0:
         raise ValueError("board_id must be a positive integer")
     return board
+
+
+def _optional_text(value: str | None, field_name: str) -> str | None:
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{field_name} must not be empty")
+    return text
+
+
+def _normalize_sprint_state(state: str | None) -> str | None:
+    if state is None:
+        return None
+    value = state.strip().lower()
+    if value not in {"future", "active", "closed"}:
+        raise ValueError("state must be one of: future, active, closed")
+    return value
 
 
 def _resolve_current_board_sprint(board_id: int) -> dict[str, Any]:
@@ -146,6 +225,14 @@ def jira_auth_status() -> dict[str, Any]:
             "cookie_source": auth_state.get_active_source(),
             "error": str(exc),
         }
+
+
+@mcp.tool()
+def jira_search_users(query: str, max_results: int | None = None) -> dict[str, Any]:
+    """Search Jira users by name, email, or username (confirm + whitelist not required)."""
+    if not query.strip():
+        raise ValueError("query is required")
+    return client.search_users(query=query.strip(), max_results=max_results or settings.default_limit)
 
 
 @mcp.tool()
@@ -198,6 +285,97 @@ def jira_list_board_sprints(
 def jira_get_current_board_sprint(board_id: int) -> dict[str, Any]:
     """Get current sprint for board id: active sprint or nearest future sprint."""
     return _resolve_current_board_sprint(board_id)
+
+
+@mcp.tool()
+def jira_create_sprint(
+    board_id: int,
+    name: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    goal: str | None = None,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Create a Jira sprint under a board (confirm + board whitelist required)."""
+    board = _ensure_board_write_allowed(board_id, confirm)
+    name_value = name.strip()
+    if not name_value:
+        raise ValueError("name is required")
+    return client.create_sprint(
+        board_id=board,
+        name=name_value,
+        start_date=_optional_text(start_date, "start_date"),
+        end_date=_optional_text(end_date, "end_date"),
+        goal=_optional_text(goal, "goal"),
+    )
+
+
+@mcp.tool()
+def jira_update_sprint(
+    sprint_id: int,
+    name: str | None = None,
+    state: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    goal: str | None = None,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Update sprint fields (confirm + sprint or board whitelist required)."""
+    if not confirm:
+        raise ValueError("write requires explicit confirm=true")
+    name_value = _optional_text(name, "name")
+    state_value = _normalize_sprint_state(state)
+    start_date_value = _optional_text(start_date, "start_date")
+    end_date_value = _optional_text(end_date, "end_date")
+    goal_value = _optional_text(goal, "goal")
+
+    if all(value is None for value in (name_value, state_value, start_date_value, end_date_value, goal_value)):
+        raise ValueError("at least one sprint field must be provided")
+
+    sprint = _ensure_sprint_manage_allowed(sprint_id, confirm)
+    return client.update_sprint(
+        sprint_id=sprint,
+        name=name_value,
+        state=state_value,
+        start_date=start_date_value,
+        end_date=end_date_value,
+        goal=goal_value,
+    )
+
+
+@mcp.tool()
+def jira_start_sprint(
+    sprint_id: int,
+    start_date: str,
+    end_date: str,
+    name: str | None = None,
+    goal: str | None = None,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Start a Jira sprint (confirm + sprint or board whitelist required)."""
+    if not confirm:
+        raise ValueError("write requires explicit confirm=true")
+    start_date_value = _optional_text(start_date, "start_date")
+    end_date_value = _optional_text(end_date, "end_date")
+    if start_date_value is None or end_date_value is None:
+        raise ValueError("start_date and end_date are required")
+
+    sprint = _ensure_sprint_manage_allowed(sprint_id, confirm)
+    return client.update_sprint(
+        sprint_id=sprint,
+        name=_optional_text(name, "name"),
+        state="active",
+        start_date=start_date_value,
+        end_date=end_date_value,
+        goal=_optional_text(goal, "goal"),
+    )
+
+
+@mcp.tool()
+def jira_close_sprint(sprint_id: int, confirm: bool = False) -> dict[str, Any]:
+    """Close a Jira sprint (confirm + sprint or board whitelist required)."""
+    sprint = _ensure_sprint_manage_allowed(sprint_id, confirm)
+    return client.update_sprint(sprint_id=sprint, state="closed")
 
 
 @mcp.tool()
@@ -341,6 +519,32 @@ def jira_link_issues(
 
 
 @mcp.tool()
+def jira_delete_issue_link(
+    link_id: str,
+    source_issue_key: str,
+    target_issue_key: str,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Delete issue link by id (confirm + whitelist required for both issues)."""
+    _ensure_write_allowed(source_issue_key, confirm)
+    _ensure_write_allowed(target_issue_key, confirm)
+    link_id_value = str(link_id).strip()
+    source_issue = source_issue_key.strip().upper()
+    target_issue = target_issue_key.strip().upper()
+    if not link_id_value:
+        raise ValueError("link_id is required")
+    if not source_issue:
+        raise ValueError("source_issue_key is required")
+    if not target_issue:
+        raise ValueError("target_issue_key is required")
+    return client.delete_issue_link(
+        link_id=link_id_value,
+        source_issue_key=source_issue,
+        target_issue_key=target_issue,
+    )
+
+
+@mcp.tool()
 def jira_update_comment(issue_key: str, comment_id: str, comment: str, confirm: bool = False) -> dict[str, Any]:
     """Update comment on issue (confirm + whitelist required)."""
     _ensure_write_allowed(issue_key, confirm)
@@ -351,6 +555,18 @@ def jira_update_comment(issue_key: str, comment_id: str, comment: str, confirm: 
     if not comment.strip():
         raise ValueError("comment must not be empty")
     return client.update_comment(issue_key=issue, comment_id=comment_id_value, comment=comment)
+
+
+@mcp.tool()
+def jira_delete_comment(
+    issue_key: str,
+    comment_id: str,
+    comment_confirm: str = "",
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Delete comment from issue (confirm + whitelist + separate comment confirmation required)."""
+    issue, comment = _ensure_delete_comment_allowed(issue_key, comment_id, confirm, comment_confirm)
+    return client.delete_comment(issue_key=issue, comment_id=comment)
 
 
 @mcp.tool()
@@ -365,6 +581,34 @@ def jira_add_attachment(issue_key: str, file_path: str, confirm: bool = False) -
     if not path.is_file():
         raise ValueError(f"file_path does not exist or is not a file: {path}")
     return client.add_attachment(issue_key=issue, file_path=str(path))
+
+
+@mcp.tool()
+def jira_download_attachment(
+    attachment_id: str | None = None,
+    issue_key: str | None = None,
+    filename: str | None = None,
+    output_dir: str = "/tmp/opencode",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Download Jira attachment by attachment id or issue+filename."""
+    attachment_id_value = (attachment_id or "").strip() or None
+    issue_key_value = (issue_key or "").strip().upper() or None
+    filename_value = (filename or "").strip() or None
+    output_dir_value = (output_dir or "").strip()
+
+    if not attachment_id_value and not (issue_key_value and filename_value):
+        raise ValueError("attachment_id or issue_key+filename is required")
+    if not output_dir_value:
+        raise ValueError("output_dir is required")
+
+    return client.download_attachment(
+        attachment_id=attachment_id_value,
+        issue_key=issue_key_value,
+        filename=filename_value,
+        output_dir=output_dir_value,
+        overwrite=overwrite,
+    )
 
 
 @mcp.tool()

@@ -23,6 +23,7 @@ class JiraTestServer(ThreadingHTTPServer):
         self.basic_header = "Basic " + base64.b64encode(b"bot:secret").decode()
         self.last_cookie_header: str | None = None
         self.last_json_body: dict | None = None
+        self.last_deleted_path: str | None = None
         self.last_uploaded_file: dict[str, str | int] | None = None
         self.request_log: list[str] = []
         super().__init__(("127.0.0.1", 0), JiraHandler)
@@ -51,6 +52,20 @@ class JiraHandler(BaseHTTPRequestHandler):
                     "total": 1,
                     "isLast": True,
                     "values": [{"id": 456, "name": "AQ Sprint 1", "state": "active"}],
+                },
+            )
+        if path.endswith("/sprint/456") and self.jira_server.scenario == "sprint_manage":
+            return self._json(
+                200,
+                {
+                    "id": 456,
+                    "self": "https://jira.example.local/rest/agile/1.0/sprint/456",
+                    "state": "future",
+                    "name": "Old sprint",
+                    "startDate": "2026-05-18T09:00:00.000+03:00",
+                    "endDate": "2026-05-29T21:00:00.000+03:00",
+                    "originBoardId": 865,
+                    "goal": "Old goal",
                 },
             )
         if path.endswith("/issue/TEAM-1/transitions"):
@@ -88,6 +103,50 @@ class JiraHandler(BaseHTTPRequestHandler):
                     ],
                 },
             )
+        if path.endswith("/issueLink/12345") and self.jira_server.scenario == "delete_issue_link":
+            return self._json(
+                200,
+                {
+                    "id": "12345",
+                    "type": {"name": "Blocks"},
+                    "inwardIssue": {"key": "PV-1"},
+                    "outwardIssue": {"key": "FRMM-1"},
+                },
+            )
+        if path.endswith("/issue/TEAM-1") and self.jira_server.scenario == "download_attachment_by_filename":
+            return self._json(
+                200,
+                {
+                    "fields": {
+                        "attachment": [
+                            {
+                                "id": "20001",
+                                "filename": "test.sql",
+                                "mimeType": "application/sql",
+                                "content": self._attachment_content_url("20001", "test.sql"),
+                            }
+                        ]
+                    }
+                },
+            )
+        if path.endswith("/attachment/20001") and self.jira_server.scenario in {
+            "download_attachment",
+            "download_attachment_cookie_fallback",
+        }:
+            if self.jira_server.scenario == "download_attachment_cookie_fallback":
+                if cookie == "JSESSIONID=bad-cookie":
+                    return self._json(403, {"errorMessages": ["bad cookie"]})
+                if auth != self.jira_server.basic_header:
+                    return self._json(403, {"errorMessages": ["forbidden"]})
+            return self._json(
+                200,
+                {
+                    "id": "20001",
+                    "filename": "test.sql",
+                    "mimeType": "application/sql",
+                    "content": self._attachment_content_url("20001", "test.sql"),
+                },
+            )
         if path.endswith("/issue/TEAM-1/attachments") and self.jira_server.scenario == "attachment_cookie_fallback":
             if cookie == "JSESSIONID=bad-cookie":
                 return self._json(403, {"errorMessages": ["bad cookie"]})
@@ -95,6 +154,20 @@ class JiraHandler(BaseHTTPRequestHandler):
             if auth == self.jira_server.basic_header:
                 return self._json(200, [{"id": "20002", "filename": "test.sql"}])
             return self._json(403, {"errorMessages": ["forbidden"]})
+        if path.endswith("/secure/attachment/20001/test.sql") and self.jira_server.scenario in {
+            "download_attachment",
+            "download_attachment_by_filename",
+            "download_attachment_cookie_fallback",
+        }:
+            if self.jira_server.scenario == "download_attachment_cookie_fallback":
+                if cookie == "JSESSIONID=bad-cookie":
+                    self.send_response(302)
+                    self.send_header("Location", "/login.jsp?permissionViolation=true")
+                    self.end_headers()
+                    return
+                if auth != self.jira_server.basic_header:
+                    return self._json(403, {"errorMessages": ["forbidden"]})
+            return self._bytes(200, b"select 1;\n", content_type="application/sql")
         return self._json(404, {"errorMessages": ["not found"]})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -141,6 +214,23 @@ class JiraHandler(BaseHTTPRequestHandler):
                     "self": "https://jira.example.local/rest/api/2/issue/10001",
                 },
             )
+        if path.endswith("/sprint") and self.jira_server.scenario == "sprint_manage":
+            return self._json(
+                201,
+                {
+                    "id": 789,
+                    "state": "future",
+                    "name": self.jira_server.last_json_body.get("name"),
+                    "originBoardId": self.jira_server.last_json_body.get("originBoardId"),
+                    "startDate": self.jira_server.last_json_body.get("startDate"),
+                    "endDate": self.jira_server.last_json_body.get("endDate"),
+                    "goal": self.jira_server.last_json_body.get("goal"),
+                },
+            )
+        if path.endswith("/issueLink") and self.jira_server.scenario == "link_issues":
+            self.send_response(201)
+            self.end_headers()
+            return
         if path.endswith("/sprint/456/issue") and self.jira_server.scenario == "sprint_write":
             return self._json(201, {})
         if path.endswith("/backlog/issue") and self.jira_server.scenario == "sprint_write":
@@ -159,6 +249,25 @@ class JiraHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if path.endswith("/issue/TEAM-1/comment/123") and self.jira_server.scenario == "update_comment":
+            self.send_response(204)
+            self.end_headers()
+            return
+        if path.endswith("/sprint/456") and self.jira_server.scenario == "sprint_manage":
+            body = dict(self.jira_server.last_json_body or {})
+            body.setdefault("id", 456)
+            return self._json(200, body)
+
+        return self._json(404, {"errorMessages": ["not found"]})
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path.endswith("/issue/TEAM-1/comment/123") and self.jira_server.scenario == "delete_comment":
+            self.jira_server.last_deleted_path = path
+            self.send_response(204)
+            self.end_headers()
+            return
+        if path.endswith("/issueLink/12345") and self.jira_server.scenario == "delete_issue_link":
+            self.jira_server.last_deleted_path = path
             self.send_response(204)
             self.end_headers()
             return
@@ -206,6 +315,16 @@ class JiraHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _bytes(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _attachment_content_url(self, attachment_id: str, filename: str) -> str:
+        return f"http://127.0.0.1:{self.jira_server.server_address[1]}/secure/attachment/{attachment_id}/{filename}"
+
 
 class JiraServerContext:
     def __init__(self, scenario: str):
@@ -236,6 +355,7 @@ def make_settings(base_url: str, storage_path: str, **overrides: object) -> Sett
         "write_project_whitelist": (),
         "write_issue_whitelist": (),
         "write_sprint_whitelist": (),
+        "write_board_whitelist": (),
         "enable_create_issue": False,
         "create_issue_project_whitelist": (),
         "enable_browser_recovery": False,
@@ -444,6 +564,77 @@ class JiraClientTests(unittest.TestCase):
                 },
             )
 
+    def test_link_issues_posts_expected_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("link_issues") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            result = client.link_issues(
+                source_issue_key="PV-1",
+                target_issue_key="FRMM-1",
+                link_type="Relates",
+                comment="Frontend task for schema update",
+            )
+
+            self.assertEqual(
+                result,
+                {
+                    "status": "ok",
+                    "source_issue_key": "PV-1",
+                    "target_issue_key": "FRMM-1",
+                    "link_type": "Relates",
+                },
+            )
+            self.assertEqual(
+                server.last_json_body,
+                {
+                    "type": {"name": "Relates"},
+                    "outwardIssue": {"key": "FRMM-1"},
+                    "inwardIssue": {"key": "PV-1"},
+                    "comment": {"body": "Frontend task for schema update"},
+                },
+            )
+
+    def test_delete_issue_link_deletes_by_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("delete_issue_link") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            result = client.delete_issue_link(
+                link_id="12345",
+                source_issue_key="PV-1",
+                target_issue_key="FRMM-1",
+            )
+
+            self.assertEqual(
+                result,
+                {
+                    "status": "ok",
+                    "link_id": "12345",
+                    "source_issue_key": "PV-1",
+                    "target_issue_key": "FRMM-1",
+                    "link": {
+                        "id": "12345",
+                        "type": {"name": "Blocks"},
+                        "inwardIssue": {"key": "PV-1"},
+                        "outwardIssue": {"key": "FRMM-1"},
+                    },
+                },
+            )
+            self.assertEqual(server.last_deleted_path, "/rest/api/2/issueLink/12345")
+
     def test_create_issue_accepts_issue_type_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("create_issue") as server:
             settings = make_settings(
@@ -518,6 +709,22 @@ class JiraClientTests(unittest.TestCase):
             self.assertEqual(result, {"status": "ok", "issue_key": "TEAM-1", "comment_id": "123"})
             self.assertEqual(server.last_json_body, {"body": "Updated comment"})
 
+    def test_delete_comment_deletes_by_issue_and_comment_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("delete_comment") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            result = client.delete_comment(issue_key="TEAM-1", comment_id="123")
+
+            self.assertEqual(result, {"status": "ok", "issue_key": "TEAM-1", "comment_id": "123"})
+            self.assertEqual(server.last_deleted_path, "/rest/api/2/issue/TEAM-1/comment/123")
+
     def test_list_board_sprints_uses_agile_endpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("board_sprints") as server:
             settings = make_settings(
@@ -535,6 +742,71 @@ class JiraClientTests(unittest.TestCase):
             self.assertEqual(result["board_id"], 865)
             self.assertEqual(result["count"], 1)
             self.assertEqual(result["sprints"][0]["id"], 456)
+
+    def test_create_sprint_posts_expected_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("sprint_manage") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            result = client.create_sprint(
+                board_id=865,
+                name="SCRUM Sprint 68",
+                start_date="2026-06-01T09:00:00.000+03:00",
+                end_date="2026-06-12T21:00:00.000+03:00",
+                goal="Digital ruble and acquiring",
+            )
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["sprint_id"], 789)
+            self.assertEqual(
+                server.last_json_body,
+                {
+                    "name": "SCRUM Sprint 68",
+                    "originBoardId": 865,
+                    "startDate": "2026-06-01T09:00:00.000+03:00",
+                    "endDate": "2026-06-12T21:00:00.000+03:00",
+                    "goal": "Digital ruble and acquiring",
+                },
+            )
+
+    def test_update_sprint_merges_current_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("sprint_manage") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            result = client.update_sprint(
+                sprint_id=456,
+                state="active",
+                start_date="2026-06-01T09:00:00.000+03:00",
+                end_date="2026-06-12T21:00:00.000+03:00",
+            )
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(
+                server.last_json_body,
+                {
+                    "id": 456,
+                    "self": "https://jira.example.local/rest/agile/1.0/sprint/456",
+                    "state": "active",
+                    "name": "Old sprint",
+                    "startDate": "2026-06-01T09:00:00.000+03:00",
+                    "endDate": "2026-06-12T21:00:00.000+03:00",
+                    "originBoardId": 865,
+                    "goal": "Old goal",
+                },
+            )
 
     def test_get_current_board_sprint_prefers_active(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("board_sprints") as server:
@@ -652,3 +924,69 @@ class JiraClientTests(unittest.TestCase):
             assert server.last_uploaded_file is not None
             self.assertGreater(int(server.last_uploaded_file["size"]), 0)
             self.assertIn('filename="test.sql"', str(server.last_uploaded_file["body"]))
+
+    def test_download_attachment_by_id_writes_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("download_attachment") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            result = client.download_attachment(
+                attachment_id="20001",
+                issue_key=None,
+                filename=None,
+                output_dir=tmpdir,
+                overwrite=False,
+            )
+
+            saved_path = Path(result["saved_path"])
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["attachment_id"], "20001")
+            self.assertEqual(result["filename"], "test.sql")
+            self.assertEqual(saved_path.read_text(), "select 1;\n")
+
+    def test_download_attachment_by_filename_writes_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("download_attachment_by_filename") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            result = client.download_attachment(
+                attachment_id=None,
+                issue_key="TEAM-1",
+                filename="test.sql",
+                output_dir=tmpdir,
+                overwrite=False,
+            )
+
+            self.assertEqual(Path(result["saved_path"]).read_text(), "select 1;\n")
+
+    def test_download_attachment_survives_login_redirect_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("download_attachment_cookie_fallback") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+            )
+            state = JiraRuntimeAuthState(settings)
+            client = JiraClient(settings, state)
+
+            result = client.download_attachment(
+                attachment_id="20001",
+                issue_key=None,
+                filename=None,
+                output_dir=tmpdir,
+                overwrite=False,
+            )
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(Path(result["saved_path"]).read_text(), "select 1;\n")

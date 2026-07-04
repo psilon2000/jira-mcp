@@ -1,14 +1,14 @@
-# План внедрения: перенести Jira auth механизм из sample-reporting-app в jira-mcp
+# План внедрения: перенести Jira auth механизм из team-report-bot в jira-mcp
 
 ## Цель
 
-- Перенести в `jira-mcp` полный механизм Jira-аутентификации по образцу `sample-reporting-app`.
+- Перенести в `jira-mcp` полный механизм Jira-аутентификации по образцу `team-report-bot`.
 - Сделать новый auth flow основным для `jira-mcp`, включая runtime cookie state, persisted internal cookie source, auth fallback и browser recovery.
 - Довести решение до состояния, где `jira_auth_status` и остальные MCP tools используют один и тот же устойчивый auth path.
 
 ## Не-цель
 
-- Не сохранять полную обратную совместимость с текущей схемой env/config, если она мешает выровнять `jira-mcp` с `sample-reporting-app`.
+- Не сохранять полную обратную совместимость с текущей схемой env/config, если она мешает выровнять `jira-mcp` с `team-report-bot`.
 - Не расширять функциональность MCP tools вне Jira auth/recovery scope.
 - Не поддерживать дополнительные enterprise auth-схемы beyond cookie/basic/basic-with-cookies/bearer + browser recovery.
 - Не строить отдельный универсальный auth framework для других сервисов.
@@ -23,10 +23,10 @@
 
 ## Предпосылки и ограничения
 
-- Источник референса: `sample-reporting-app`, прежде всего `src/SampleReportingApp/Jira/LoggingJiraGateway.cs`, `src/SampleReportingApp/Jira/JiraRuntimeAuthState.cs`, `src/SampleReportingApp/Jira/ExternalJiraBrowserRecoveryService.cs`, `src/SampleReportingApp/Configuration/JiraOptionsValidator.cs`.
+- Источник референса: `team-report-bot`, прежде всего `src/TeamReportBot/Jira/LoggingJiraGateway.cs`, `src/TeamReportBot/Jira/JiraRuntimeAuthState.cs`, `src/TeamReportBot/Jira/ExternalJiraBrowserRecoveryService.cs`, `src/TeamReportBot/Configuration/JiraOptionsValidator.cs`.
 - Текущий `jira-mcp` реализован на Python (`requests`, `python-dotenv`) и сейчас имеет упрощенный auth layer в `jira_mcp/config.py`, `jira_mcp/jira_client.py`, `jira_mcp/server.py`.
 - Выбран полный scope переноса: internal cookie storage + fallback + browser recovery.
-- Допустимы breaking changes в env/config, если итоговый runtime-поток станет близок к `sample-reporting-app`.
+- Допустимы breaking changes в env/config, если итоговый runtime-поток станет близок к `team-report-bot`.
 - План должен включать unit и integration/e2e проверку, а не только локальный smoke.
 - Отдельный feature flag/compat mode для отката не требуется; откат делаем возвратом на предыдущую ревизию или временным отключением recovery/config на уровне деплоя.
 
