@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,16 @@ auth_state = JiraRuntimeAuthState(settings)
 recovery_service = BrowserRecoveryService(settings, auth_state)
 client = JiraClient(settings, auth_state, recovery_service)
 mcp = FastMCP("jira-mcp")
+ISSUE_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*-\d+$")
+
+
+def _normalize_issue_key(issue_key: str) -> str:
+    issue = (issue_key or "").strip().upper()
+    if not issue:
+        raise ValueError("issue_key is required")
+    if not ISSUE_KEY_PATTERN.fullmatch(issue):
+        raise ValueError("issue_key must use Jira key format, for example TEAM-123")
+    return issue
 
 
 def _project_from_issue_key(issue_key: str) -> str:
@@ -29,9 +40,7 @@ def _ensure_write_allowed(issue_key: str, confirm: bool) -> None:
     if not confirm:
         raise ValueError("write requires explicit confirm=true")
 
-    issue = issue_key.strip().upper()
-    if not issue:
-        raise ValueError("issue_key is required")
+    issue = _normalize_issue_key(issue_key)
 
     if not settings.write_issue_whitelist and not settings.write_project_whitelist:
         raise ValueError(
@@ -147,10 +156,9 @@ def _ensure_sprint_manage_allowed(sprint_id: int, confirm: bool) -> int:
 def _normalize_issue_keys(issue_keys: list[str]) -> list[str]:
     normalized: list[str] = []
     for issue_key in issue_keys:
-        issue = (issue_key or "").strip().upper()
-        if not issue:
+        if not (issue_key or "").strip():
             continue
-        normalized.append(issue)
+        normalized.append(_normalize_issue_key(issue_key))
     if not normalized:
         raise ValueError("issue_keys must not be empty")
     return normalized
@@ -161,6 +169,36 @@ def _normalize_board_id(board_id: int) -> int:
     if board <= 0:
         raise ValueError("board_id must be a positive integer")
     return board
+
+
+def _normalize_start_at(start_at: int) -> int:
+    value = int(start_at)
+    if value < 0:
+        raise ValueError("start_at must be a non-negative integer")
+    return value
+
+
+def _normalize_limit(limit: int | None) -> int:
+    value = settings.default_limit if limit is None else int(limit)
+    if value <= 0:
+        raise ValueError("limit must be a positive integer")
+    return min(value, 200)
+
+
+def _normalize_project_key(project_key: str) -> str:
+    project = (project_key or "").strip().upper()
+    if not project:
+        raise ValueError("project_key is required")
+    return project
+
+
+def _normalize_text_list(values: list[str] | None, field_name: str) -> list[str] | None:
+    if values is None:
+        return None
+    normalized = [str(value).strip() for value in values if str(value).strip()]
+    if not normalized:
+        raise ValueError(f"{field_name} must not be empty")
+    return list(dict.fromkeys(normalized))
 
 
 def _optional_text(value: str | None, field_name: str) -> str | None:
@@ -236,11 +274,21 @@ def jira_search_users(query: str, max_results: int | None = None) -> dict[str, A
 
 
 @mcp.tool()
-def jira_search_issues(jql: str, fields: list[str] | None = None, limit: int | None = None) -> dict[str, Any]:
+def jira_search_issues(
+    jql: str,
+    fields: list[str] | None = None,
+    limit: int | None = None,
+    start_at: int = 0,
+) -> dict[str, Any]:
     """Search issues by JQL."""
     if not jql.strip():
         raise ValueError("jql is required")
-    return client.search_issues(jql=jql, fields=fields, limit=limit or settings.default_limit)
+    return client.search_issues(
+        jql=jql,
+        fields=fields,
+        limit=_normalize_limit(limit),
+        start_at=_normalize_start_at(start_at),
+    )
 
 
 @mcp.tool()
@@ -258,9 +306,91 @@ def jira_get_issue(
     expand: list[str] | None = None,
 ) -> dict[str, Any]:
     """Get issue details by key."""
-    if not issue_key.strip():
-        raise ValueError("issue_key is required")
-    return client.get_issue(issue_key=issue_key.strip(), fields=fields, expand=expand)
+    return client.get_issue(issue_key=_normalize_issue_key(issue_key), fields=fields, expand=expand)
+
+
+@mcp.tool()
+def jira_list_issue_worklogs(
+    issue_key: str,
+    limit: int | None = None,
+    start_at: int = 0,
+) -> dict[str, Any]:
+    """List issue worklogs with pagination."""
+    issue = _normalize_issue_key(issue_key)
+    return client.list_issue_worklogs(
+        issue_key=issue,
+        limit=_normalize_limit(limit),
+        start_at=_normalize_start_at(start_at),
+    )
+
+
+@mcp.tool()
+def jira_get_issue_changelog(
+    issue_key: str,
+    limit: int | None = None,
+    start_at: int = 0,
+) -> dict[str, Any]:
+    """Get paginated issue changelog history."""
+    issue = _normalize_issue_key(issue_key)
+    return client.get_issue_changelog(
+        issue_key=issue,
+        limit=_normalize_limit(limit),
+        start_at=_normalize_start_at(start_at),
+    )
+
+
+@mcp.tool()
+def jira_list_fields(query: str | None = None, custom_only: bool = False) -> dict[str, Any]:
+    """List Jira fields, optionally filtered by text and custom fields."""
+    query_value = _optional_text(query, "query")
+    return client.list_fields(query=query_value, custom_only=custom_only)
+
+
+@mcp.tool()
+def jira_get_issue_edit_metadata(
+    issue_key: str,
+    field_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Get editable field metadata and allowed values for an issue."""
+    issue = _normalize_issue_key(issue_key)
+    return client.get_issue_edit_metadata(
+        issue_key=issue,
+        field_ids=_normalize_text_list(field_ids, "field_ids"),
+    )
+
+
+@mcp.tool()
+def jira_get_project(project_key: str, expand: list[str] | None = None) -> dict[str, Any]:
+    """Get Jira project details by key."""
+    return client.get_project(
+        project_key=_normalize_project_key(project_key),
+        expand=_normalize_text_list(expand, "expand"),
+    )
+
+
+@mcp.tool()
+def jira_list_boards(
+    project_key_or_id: str | None = None,
+    name: str | None = None,
+    board_type: str | None = None,
+    limit: int | None = None,
+    start_at: int = 0,
+) -> dict[str, Any]:
+    """List Jira Agile boards with optional filters and pagination."""
+    return client.list_boards(
+        project_key_or_id=_optional_text(project_key_or_id, "project_key_or_id"),
+        name=_optional_text(name, "name"),
+        board_type=_optional_text(board_type, "board_type"),
+        limit=_normalize_limit(limit),
+        start_at=_normalize_start_at(start_at),
+    )
+
+
+@mcp.tool()
+def jira_get_board_configuration(board_id: int) -> dict[str, Any]:
+    """Get Jira Agile board configuration by id."""
+    board = _normalize_board_id(board_id)
+    return client.get_board_configuration(board_id=board)
 
 
 @mcp.tool()
@@ -276,8 +406,8 @@ def jira_list_board_sprints(
     return client.list_board_sprints(
         board_id=board,
         state=state_value,
-        limit=limit or settings.default_limit,
-        start_at=start_at,
+        limit=_normalize_limit(limit),
+        start_at=_normalize_start_at(start_at),
     )
 
 
@@ -381,9 +511,7 @@ def jira_close_sprint(sprint_id: int, confirm: bool = False) -> dict[str, Any]:
 @mcp.tool()
 def jira_list_transitions(issue_key: str) -> dict[str, Any]:
     """List allowed transitions for issue."""
-    if not issue_key.strip():
-        raise ValueError("issue_key is required")
-    return client.list_transitions(issue_key=issue_key.strip())
+    return client.list_transitions(issue_key=_normalize_issue_key(issue_key))
 
 
 @mcp.tool()
@@ -584,6 +712,17 @@ def jira_add_attachment(issue_key: str, file_path: str, confirm: bool = False) -
 
 
 @mcp.tool()
+def jira_delete_attachment(issue_key: str, attachment_id: str, confirm: bool = False) -> dict[str, Any]:
+    """Delete an issue attachment after verifying issue ownership (confirm + whitelist required)."""
+    _ensure_write_allowed(issue_key, confirm)
+    issue = issue_key.strip().upper()
+    attachment = str(attachment_id or "").strip()
+    if not attachment:
+        raise ValueError("attachment_id is required")
+    return client.delete_attachment(issue_key=issue, attachment_id=attachment)
+
+
+@mcp.tool()
 def jira_download_attachment(
     attachment_id: str | None = None,
     issue_key: str | None = None,
@@ -593,7 +732,7 @@ def jira_download_attachment(
 ) -> dict[str, Any]:
     """Download Jira attachment by attachment id or issue+filename."""
     attachment_id_value = (attachment_id or "").strip() or None
-    issue_key_value = (issue_key or "").strip().upper() or None
+    issue_key_value = _normalize_issue_key(issue_key) if (issue_key or "").strip() else None
     filename_value = (filename or "").strip() or None
     output_dir_value = (output_dir or "").strip()
 

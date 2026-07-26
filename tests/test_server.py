@@ -23,6 +23,77 @@ class ServerToolTests(unittest.TestCase):
             module = importlib.import_module("jira_mcp.server")
             return importlib.reload(module)
 
+    def test_search_issues_passes_pagination(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server.client, "search_issues", return_value={"status": "ok"}) as search_issues:
+            result = server.jira_search_issues(
+                jql=" project = TEAM ",
+                fields=["summary"],
+                limit=250,
+                start_at=200,
+            )
+
+        self.assertEqual(result, {"status": "ok"})
+        search_issues.assert_called_once_with(
+            jql=" project = TEAM ",
+            fields=["summary"],
+            limit=200,
+            start_at=200,
+        )
+
+    def test_search_issues_rejects_negative_start_at(self) -> None:
+        server = self._load_server_module()
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            server.jira_search_issues(jql="project = TEAM", start_at=-1)
+
+    def test_issue_history_tools_normalize_arguments(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server.client, "list_issue_worklogs", return_value={"status": "ok"}) as worklogs:
+            server.jira_list_issue_worklogs(issue_key=" team-1 ", limit=10, start_at=5)
+        with patch.object(server.client, "get_issue_changelog", return_value={"status": "ok"}) as changelog:
+            server.jira_get_issue_changelog(issue_key=" team-1 ", limit=20, start_at=10)
+
+        worklogs.assert_called_once_with(issue_key="TEAM-1", limit=10, start_at=5)
+        changelog.assert_called_once_with(issue_key="TEAM-1", limit=20, start_at=10)
+
+    def test_metadata_tools_normalize_filters(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server.client, "list_fields", return_value={"status": "ok"}) as list_fields:
+            server.jira_list_fields(query=" Epic ", custom_only=True)
+        with patch.object(server.client, "get_issue_edit_metadata", return_value={"status": "ok"}) as editmeta:
+            server.jira_get_issue_edit_metadata(
+                issue_key=" team-1 ",
+                field_ids=[" customfield_10008 ", "customfield_10008"],
+            )
+        with patch.object(server.client, "get_project", return_value={"status": "ok"}) as get_project:
+            server.jira_get_project(project_key=" team ", expand=[" description ", "lead"])
+
+        list_fields.assert_called_once_with(query="Epic", custom_only=True)
+        editmeta.assert_called_once_with(issue_key="TEAM-1", field_ids=["customfield_10008"])
+        get_project.assert_called_once_with(project_key="TEAM", expand=["description", "lead"])
+
+    def test_board_tools_normalize_filters(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server.client, "list_boards", return_value={"status": "ok"}) as list_boards:
+            server.jira_list_boards(
+                project_key_or_id=" TEAM ",
+                name=" Team board ",
+                board_type=" scrum ",
+                limit=20,
+                start_at=10,
+            )
+        with patch.object(server.client, "get_board_configuration", return_value={"status": "ok"}) as config:
+            server.jira_get_board_configuration(board_id=865)
+
+        list_boards.assert_called_once_with(
+            project_key_or_id="TEAM",
+            name="Team board",
+            board_type="scrum",
+            limit=20,
+            start_at=10,
+        )
+        config.assert_called_once_with(board_id=865)
+
     def test_create_issue_requires_confirm(self) -> None:
         server = self._load_server_module()
         with patch.object(
@@ -292,6 +363,55 @@ class ServerToolTests(unittest.TestCase):
 
         self.assertEqual(result, {"status": "ok", "attachment_id": "1"})
         add_attachment.assert_called_once_with(issue_key="AQ-1", file_path=str(file_path.resolve()))
+
+    def test_delete_attachment_requires_confirm(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "confirm=true"):
+                server.jira_delete_attachment(issue_key="AQ-1", attachment_id="20001")
+
+    def test_delete_attachment_requires_attachment_id(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "attachment_id is required"):
+                server.jira_delete_attachment(issue_key="AQ-1", attachment_id="  ", confirm=True)
+
+    def test_delete_attachment_rejects_path_like_issue_key(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "Jira key format"):
+                server.jira_delete_attachment(
+                    issue_key="AQ-1/../../issue/SECRET-1",
+                    attachment_id="20001",
+                    confirm=True,
+                )
+
+    def test_delete_attachment_rejects_unapproved_project(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with self.assertRaisesRegex(ValueError, "not allowed"):
+                server.jira_delete_attachment(
+                    issue_key="TEAM-1",
+                    attachment_id="20001",
+                    confirm=True,
+                )
+
+    def test_delete_attachment_calls_client(self) -> None:
+        server = self._load_server_module()
+        with patch.object(server, "settings", replace(server.settings, write_project_whitelist=("AQ",))):
+            with patch.object(
+                server.client,
+                "delete_attachment",
+                return_value={"status": "ok", "attachment_id": "20001"},
+            ) as delete_attachment:
+                result = server.jira_delete_attachment(
+                    issue_key=" aq-1 ",
+                    attachment_id=" 20001 ",
+                    confirm=True,
+                )
+
+        self.assertEqual(result, {"status": "ok", "attachment_id": "20001"})
+        delete_attachment.assert_called_once_with(issue_key="AQ-1", attachment_id="20001")
 
     def test_download_attachment_requires_selector(self) -> None:
         server = self._load_server_module()

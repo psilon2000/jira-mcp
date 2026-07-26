@@ -58,9 +58,16 @@ class JiraClient:
             },
         }
 
-    def search_issues(self, jql: str, fields: list[str] | None, limit: int) -> dict[str, Any]:
+    def search_issues(
+        self,
+        jql: str,
+        fields: list[str] | None,
+        limit: int,
+        start_at: int = 0,
+    ) -> dict[str, Any]:
         max_results = max(1, min(limit, 200))
-        cached = self._cache.get_search(jql=jql, fields=fields, limit=max_results)
+        page_start = max(0, start_at)
+        cached = self._cache.get_search(jql=jql, fields=fields, limit=max_results, start_at=page_start)
         if cached is not None:
             result = dict(cached.payload)
             result["cache"] = self._cache_info(cached, is_hit=True)
@@ -68,7 +75,7 @@ class JiraClient:
 
         params: dict[str, Any] = {
             "jql": jql,
-            "startAt": 0,
+            "startAt": page_start,
             "maxResults": max_results,
         }
         if fields:
@@ -76,13 +83,26 @@ class JiraClient:
 
         response = self._request("GET", "/search", params=params)
         payload = response.json()
+        issues = payload.get("issues", []) or []
+        total = int(payload.get("total") or 0)
+        response_start = int(payload.get("startAt") if payload.get("startAt") is not None else page_start)
+        response_limit = int(payload.get("maxResults") if payload.get("maxResults") is not None else max_results)
         result = {
             "status": "ok",
-            "total": payload.get("total", 0),
-            "count": len(payload.get("issues", []) or []),
-            "issues": payload.get("issues", []),
+            "total": total,
+            "count": len(issues),
+            "start_at": response_start,
+            "max_results": response_limit,
+            "is_last": response_start + len(issues) >= total,
+            "issues": issues,
         }
-        self._cache.put_search(jql=jql, fields=fields, limit=max_results, result=result)
+        self._cache.put_search(
+            jql=jql,
+            fields=fields,
+            limit=max_results,
+            result=result,
+            start_at=page_start,
+        )
         if self._cache.enabled:
             result["cache"] = self._cache_info(None, is_hit=False)
         return result
@@ -111,6 +131,129 @@ class JiraClient:
         if self._cache.enabled:
             result["cache"] = self._cache_info(None, is_hit=False)
         return result
+
+    def list_issue_worklogs(self, issue_key: str, limit: int, start_at: int = 0) -> dict[str, Any]:
+        max_results = max(1, min(limit, 200))
+        page_start = max(0, start_at)
+        response = self._request(
+            "GET",
+            f"/issue/{issue_key}/worklog",
+            params={"startAt": page_start, "maxResults": max_results},
+        )
+        payload = response.json()
+        worklogs = payload.get("worklogs", []) or []
+        total = int(payload.get("total") or 0)
+        response_start = int(payload.get("startAt") if payload.get("startAt") is not None else page_start)
+        response_limit = int(payload.get("maxResults") if payload.get("maxResults") is not None else max_results)
+        return {
+            "status": "ok",
+            "issue_key": issue_key,
+            "total": total,
+            "count": len(worklogs),
+            "start_at": response_start,
+            "max_results": response_limit,
+            "is_last": response_start + len(worklogs) >= total,
+            "worklogs": worklogs,
+        }
+
+    def get_issue_changelog(self, issue_key: str, limit: int, start_at: int = 0) -> dict[str, Any]:
+        max_results = max(1, min(limit, 200))
+        page_start = max(0, start_at)
+        response = self._request(
+            "GET",
+            f"/issue/{issue_key}/changelog",
+            params={"startAt": page_start, "maxResults": max_results},
+            accepted_statuses={404},
+        )
+        source = "endpoint"
+        if response.status_code == 404:
+            issue_response = self._request(
+                "GET",
+                f"/issue/{issue_key}",
+                params={"fields": "*none", "expand": "changelog"},
+            )
+            issue_payload = issue_response.json()
+            changelog = issue_payload.get("changelog") if isinstance(issue_payload, dict) else None
+            payload = changelog if isinstance(changelog, dict) else {}
+            source = "issue_expand"
+        else:
+            payload = response.json()
+        histories = payload.get("values") or payload.get("histories") or []
+        total = int(payload.get("total") or 0)
+        default_start = 0 if source == "issue_expand" else page_start
+        response_start = int(payload.get("startAt") if payload.get("startAt") is not None else default_start)
+        response_limit = int(payload.get("maxResults") if payload.get("maxResults") is not None else max_results)
+        if source == "issue_expand" and response_start != page_start:
+            raise ValueError("this Jira version exposes only the first changelog page through issue expansion")
+        is_last = payload.get("isLast")
+        if is_last is None:
+            is_last = response_start + len(histories) >= total
+        return {
+            "status": "ok",
+            "issue_key": issue_key,
+            "total": total,
+            "count": len(histories),
+            "start_at": response_start,
+            "max_results": response_limit,
+            "is_last": bool(is_last),
+            "source": source,
+            "histories": histories,
+        }
+
+    def list_fields(self, query: str | None = None, custom_only: bool = False) -> dict[str, Any]:
+        response = self._request("GET", "/field")
+        payload = response.json()
+        fields = payload if isinstance(payload, list) else []
+        needle = (query or "").strip().casefold()
+        filtered: list[dict[str, Any]] = []
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            field_id = str(field.get("id") or "")
+            is_custom = bool(field.get("custom")) or field_id.startswith("customfield_")
+            if custom_only and not is_custom:
+                continue
+            searchable = " ".join(
+                [
+                    field_id,
+                    str(field.get("name") or ""),
+                    *[str(item) for item in field.get("clauseNames", []) or []],
+                ]
+            ).casefold()
+            if needle and needle not in searchable:
+                continue
+            filtered.append(field)
+        return {
+            "status": "ok",
+            "query": query,
+            "custom_only": custom_only,
+            "count": len(filtered),
+            "fields": filtered,
+        }
+
+    def get_issue_edit_metadata(
+        self,
+        issue_key: str,
+        field_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        response = self._request("GET", f"/issue/{issue_key}/editmeta")
+        payload = response.json()
+        fields = payload.get("fields") if isinstance(payload, dict) else None
+        metadata = fields if isinstance(fields, dict) else {}
+        if field_ids is not None:
+            requested = {str(field_id).strip() for field_id in field_ids if str(field_id).strip()}
+            metadata = {field_id: value for field_id, value in metadata.items() if field_id in requested}
+        return {
+            "status": "ok",
+            "issue_key": issue_key,
+            "count": len(metadata),
+            "fields": metadata,
+        }
+
+    def get_project(self, project_key: str, expand: list[str] | None = None) -> dict[str, Any]:
+        params = {"expand": ",".join(expand)} if expand else None
+        response = self._request("GET", f"/project/{project_key}", params=params)
+        return {"status": "ok", "project_key": project_key, "project": response.json()}
 
     def search_cached_issues(self, query: str, limit: int) -> dict[str, Any]:
         return self._cache.search_text(query=query, limit=limit)
@@ -142,6 +285,50 @@ class JiraClient:
             "total": payload.get("total"),
             "sprints": values,
         }
+
+    def list_boards(
+        self,
+        project_key_or_id: str | None,
+        name: str | None,
+        board_type: str | None,
+        limit: int,
+        start_at: int = 0,
+    ) -> dict[str, Any]:
+        max_results = max(1, min(limit, 200))
+        page_start = max(0, start_at)
+        params: dict[str, Any] = {
+            "startAt": page_start,
+            "maxResults": max_results,
+        }
+        if project_key_or_id:
+            params["projectKeyOrId"] = project_key_or_id
+        if name:
+            params["name"] = name
+        if board_type:
+            params["type"] = board_type
+
+        response = self._request_agile("GET", "/board", params=params)
+        payload = response.json()
+        boards = payload.get("values", []) or []
+        total = int(payload.get("total") or 0)
+        response_start = int(payload.get("startAt") if payload.get("startAt") is not None else page_start)
+        response_limit = int(payload.get("maxResults") if payload.get("maxResults") is not None else max_results)
+        is_last = payload.get("isLast")
+        if is_last is None:
+            is_last = response_start + len(boards) >= total
+        return {
+            "status": "ok",
+            "total": total,
+            "count": len(boards),
+            "start_at": response_start,
+            "max_results": response_limit,
+            "is_last": bool(is_last),
+            "boards": boards,
+        }
+
+    def get_board_configuration(self, board_id: int) -> dict[str, Any]:
+        response = self._request_agile("GET", f"/board/{board_id}/configuration")
+        return {"status": "ok", "board_id": board_id, "configuration": response.json()}
 
     def get_sprint(self, sprint_id: int) -> dict[str, Any]:
         response = self._request_agile("GET", f"/sprint/{sprint_id}")
@@ -398,6 +585,41 @@ class JiraClient:
             "attachment": attachment,
         }
 
+    def delete_attachment(self, issue_key: str, attachment_id: str) -> dict[str, Any]:
+        response = self._request("GET", f"/issue/{issue_key}", params={"fields": "attachment"})
+        issue = response.json()
+        actual_issue_key = str(issue.get("key") or "").strip().upper() if isinstance(issue, dict) else ""
+        if actual_issue_key != issue_key.upper():
+            raise ValueError(
+                f"issue lookup resolved to '{actual_issue_key or '[missing]'}', expected '{issue_key.upper()}'"
+            )
+        fields = issue.get("fields") if isinstance(issue, dict) else None
+        attachments = fields.get("attachment", []) if isinstance(fields, dict) else []
+        attachment = next(
+            (
+                item
+                for item in attachments
+                if isinstance(item, dict) and str(item.get("id") or "").strip() == attachment_id
+            ),
+            None,
+        )
+        if attachment is None:
+            raise ValueError(f"attachment '{attachment_id}' not found in issue '{issue_key}'")
+
+        self._request(
+            "DELETE",
+            f"/attachment/{attachment_id}",
+            allow_forbidden_auth_fallback=False,
+        )
+        self._invalidate_issue_cache(issue_key)
+        return {
+            "status": "ok",
+            "issue_key": issue_key,
+            "attachment_id": attachment_id,
+            "filename": attachment.get("filename"),
+            "attachment": attachment,
+        }
+
     def download_attachment(
         self,
         attachment_id: str | None,
@@ -532,9 +754,25 @@ class JiraClient:
             raise ValueError(f"attachment filename is not unique in issue '{issue_key_value}': {filename_value}")
         return matches[0]
 
-    def _request(self, method: str, path: str, allow_browser_recovery: bool = True, **kwargs: Any) -> Response:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        allow_browser_recovery: bool = True,
+        accepted_statuses: set[int] | None = None,
+        allow_forbidden_auth_fallback: bool = True,
+        **kwargs: Any,
+    ) -> Response:
         url = f"{self._settings.rest_root.rstrip('/')}/{path.lstrip('/')}"
-        return self._request_absolute_url(method, url, path, allow_browser_recovery=allow_browser_recovery, **kwargs)
+        return self._request_absolute_url(
+            method,
+            url,
+            path,
+            allow_browser_recovery=allow_browser_recovery,
+            accepted_statuses=accepted_statuses,
+            allow_forbidden_auth_fallback=allow_forbidden_auth_fallback,
+            **kwargs,
+        )
 
     def _request_agile(self, method: str, path: str, allow_browser_recovery: bool = True, **kwargs: Any) -> Response:
         url = f"{self._settings.agile_rest_root.rstrip('/')}/{path.lstrip('/')}"
@@ -594,6 +832,8 @@ class JiraClient:
         url: str,
         path: str,
         allow_browser_recovery: bool = True,
+        accepted_statuses: set[int] | None = None,
+        allow_forbidden_auth_fallback: bool = True,
         **kwargs: Any,
     ) -> Response:
         attempts = self._build_auth_attempts()
@@ -604,17 +844,21 @@ class JiraClient:
         for attempt in attempts:
             tried.append(attempt.name)
             response = self._send_with_attempt(attempt, method, url, **kwargs)
-            if response.ok:
+            if response.ok or response.status_code in (accepted_statuses or set()):
                 return response
 
-            if self._is_auth_failure(response):
+            can_retry_auth = response.status_code != 403 or allow_forbidden_auth_fallback
+            if self._is_auth_failure(response) and can_retry_auth:
                 if attempt.name == AUTH_MODE_COOKIE and self._auth_state.mark_active_cookie_invalid():
                     retried = f"{attempt.name}(configured_env)"
                     tried.append(retried)
                     fallback_response = self._send_with_attempt(attempt, method, url, **kwargs)
-                    if fallback_response.ok:
+                    if fallback_response.ok or fallback_response.status_code in (accepted_statuses or set()):
                         return fallback_response
-                    if not self._is_auth_failure(fallback_response):
+                    fallback_can_retry = (
+                        fallback_response.status_code != 403 or allow_forbidden_auth_fallback
+                    )
+                    if not self._is_auth_failure(fallback_response) or not fallback_can_retry:
                         self._raise_for_response(method, path, fallback_response)
                 continue
 
@@ -624,7 +868,15 @@ class JiraClient:
             recovery = self._recovery_service.try_recover(f"Jira auth failed after attempts: {' -> '.join(tried)}")
             if recovery.is_success:
                 self._reset_sessions()
-                return self._request_absolute_url(method, url, path, allow_browser_recovery=False, **kwargs)
+                return self._request_absolute_url(
+                    method,
+                    url,
+                    path,
+                    allow_browser_recovery=False,
+                    accepted_statuses=accepted_statuses,
+                    allow_forbidden_auth_fallback=allow_forbidden_auth_fallback,
+                    **kwargs,
+                )
             raise RuntimeError(
                 f"Jira auth failed after attempts: {' -> '.join(tried)}; recovery={recovery.details}"
             )

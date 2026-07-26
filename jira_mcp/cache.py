@@ -105,28 +105,42 @@ class JiraCache:
         self._entries(data, "searches").clear()
         self._save(data)
 
-    def get_search(self, jql: str, fields: list[str] | None, limit: int) -> CacheHit | None:
+    def get_search(
+        self,
+        jql: str,
+        fields: list[str] | None,
+        limit: int,
+        start_at: int = 0,
+    ) -> CacheHit | None:
         if not self._enabled:
             return None
 
-        key = self.search_key(jql, fields, limit)
+        key = self.search_key(jql, fields, limit, start_at)
         entry = self._load().get("searches", {}).get(key)
         hit = self._hit_from_entry(key, entry)
         if hit is None or hit.age_seconds > self._ttl_seconds:
             return None
         return hit
 
-    def put_search(self, jql: str, fields: list[str] | None, limit: int, result: dict[str, Any]) -> None:
+    def put_search(
+        self,
+        jql: str,
+        fields: list[str] | None,
+        limit: int,
+        result: dict[str, Any],
+        start_at: int = 0,
+    ) -> None:
         if not self._enabled:
             return
 
         data = self._load()
         searches = self._entries(data, "searches")
-        searches[self.search_key(jql, fields, limit)] = self._entry(
+        searches[self.search_key(jql, fields, limit, start_at)] = self._entry(
             payload=result,
             jql=jql.strip(),
             fields=self._normalize_list(fields),
             limit=limit,
+            start_at=max(0, start_at),
         )
 
         issues = self._entries(data, "issues")
@@ -211,13 +225,14 @@ class JiraCache:
             },
         )
 
-    def search_key(self, jql: str, fields: list[str] | None, limit: int) -> str:
+    def search_key(self, jql: str, fields: list[str] | None, limit: int, start_at: int = 0) -> str:
         return self._stable_key(
             "search",
             {
                 "jql": jql.strip(),
                 "fields": self._normalize_list(fields),
                 "limit": max(1, min(limit, 200)),
+                "start_at": max(0, start_at),
             },
         )
 

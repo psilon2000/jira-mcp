@@ -4,8 +4,12 @@ MCP server (Python) for Jira read/write operations used in Telegram bot e2e test
 
 ## Features
 
-- Search/read issues (`jira_search_issues`, `jira_get_issue`)
+- Search/read issues with pagination (`jira_search_issues`, `jira_get_issue`)
+- Read paginated worklogs and changelog (`jira_list_issue_worklogs`, `jira_get_issue_changelog`)
+- Discover fields and edit metadata (`jira_list_fields`, `jira_get_issue_edit_metadata`)
+- Read project details (`jira_get_project`)
 - Text search over the local Jira cache (`jira_search_cached_issues`)
+- Discover Agile boards and configuration (`jira_list_boards`, `jira_get_board_configuration`)
 - List board sprints (`jira_list_board_sprints`)
 - Create/update/start/close sprints (`jira_create_sprint`, `jira_update_sprint`, `jira_start_sprint`, `jira_close_sprint`)
 - Check available transitions (`jira_list_transitions`)
@@ -19,6 +23,7 @@ MCP server (Python) for Jira read/write operations used in Telegram bot e2e test
 - Delete comment (`jira_delete_comment`)
 - Add attachment (`jira_add_attachment`)
 - Download attachment (`jira_download_attachment`)
+- Delete attachment (`jira_delete_attachment`)
 - Delete issue link (`jira_delete_issue_link`)
 - Add issues to sprint (`jira_add_issues_to_sprint`)
 - Remove issues from sprint (`jira_remove_issues_from_sprint`)
@@ -29,6 +34,7 @@ Write safety:
 - `jira_add_comment` additionally requires a separate explicit confirmation string: `comment_confirm="ADD_COMMENT <ISSUE-KEY>"`.
 - `jira_delete_comment` additionally requires a separate explicit confirmation string: `comment_confirm="DELETE_COMMENT <ISSUE-KEY> <COMMENT-ID>"`.
 - Write is allowed only for issue/project whitelist from env.
+- Attachment deletion verifies that the attachment belongs to the whitelisted issue before deleting it.
 - Sprint management is allowed only for sprint or board whitelist from env.
 - Issue creation has a separate feature flag and is restricted to one configured project.
 
@@ -133,9 +139,16 @@ python -m unittest discover -s tests
 ## Tool Examples
 
 - `jira_auth_status()`
-- `jira_search_issues(jql="project = TEAM ORDER BY updated DESC", limit=20)`
+- `jira_search_issues(jql="project = TEAM ORDER BY updated DESC", limit=20, start_at=0)`
 - `jira_search_cached_issues(query="release notes", limit=20)`
 - `jira_get_issue(issue_key="TEAM-123")`
+- `jira_list_issue_worklogs(issue_key="TEAM-123", limit=50, start_at=0)`
+- `jira_get_issue_changelog(issue_key="TEAM-123", limit=50, start_at=0)`
+- `jira_list_fields(query="Epic", custom_only=True)`
+- `jira_get_issue_edit_metadata(issue_key="TEAM-123", field_ids=["summary", "customfield_10008"])`
+- `jira_get_project(project_key="TEAM", expand=["description", "lead"])`
+- `jira_list_boards(project_key_or_id="TEAM", board_type="scrum", limit=50)`
+- `jira_get_board_configuration(board_id=865)`
 - `jira_list_board_sprints(board_id=865, state="active")`
 - `jira_get_current_board_sprint(board_id=865)`
 - `jira_create_sprint(board_id=865, name="SCRUM Спринт 68", start_date="2026-06-01T09:00:00.000+03:00", end_date="2026-06-12T21:00:00.000+03:00", goal="ЦР для физлиц, срочные задачи ИЭ, рекурренты СБП", confirm=True)`
@@ -155,6 +168,7 @@ python -m unittest discover -s tests
 - `jira_update_comment(issue_key="TEAM-123", comment_id="456", comment="Updated text", confirm=True)`
 - `jira_delete_comment(issue_key="TEAM-123", comment_id="456", comment_confirm="DELETE_COMMENT TEAM-123 456", confirm=True)`
 - `jira_add_attachment(issue_key="TEAM-123", file_path="/tmp/report.txt", confirm=True)`
+- `jira_delete_attachment(issue_key="TEAM-123", attachment_id="20001", confirm=True)`
 - `jira_download_attachment(attachment_id="20001", output_dir="/tmp/opencode")`
 - `jira_download_attachment(issue_key="TEAM-123", filename="report.txt", output_dir="/tmp/opencode")`
 - `jira_delete_issue_link(link_id="12345", source_issue_key="TEAM-123", target_issue_key="TEAM-124", confirm=True)`
@@ -164,3 +178,9 @@ python -m unittest discover -s tests
 - `jira_remove_issues_from_current_board_sprint(board_id=865, issue_keys=["AQ-123"], confirm=True)`
 
 `started` format for worklog: `YYYY-MM-DDTHH:MM:SS.000+ZZZZ` (for example `+0300`).
+
+Pagination notes:
+- `jira_search_issues`, `jira_list_issue_worklogs`, `jira_get_issue_changelog`, `jira_list_boards`, and `jira_list_board_sprints` accept `start_at`.
+- Page size is capped at 200 items. Use the returned `start_at`, `count`, `total`, and `is_last` fields to request additional pages.
+- `jira_get_issue_changelog` falls back to issue `expand=changelog` when the dedicated endpoint is unavailable; that fallback exposes only the first page and returns `source="issue_expand"`.
+- Search keeps the existing Jira Server/Data Center `startAt` contract; Jira Cloud `nextPageToken` pagination is not implemented.

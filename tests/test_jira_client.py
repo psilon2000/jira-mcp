@@ -8,6 +8,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast
+from urllib.parse import parse_qs, urlsplit
 
 from jira_mcp.auth_state import JiraRuntimeAuthState
 from jira_mcp.config import Settings
@@ -26,6 +27,7 @@ class JiraTestServer(ThreadingHTTPServer):
         self.last_deleted_path: str | None = None
         self.last_uploaded_file: dict[str, str | int] | None = None
         self.request_log: list[str] = []
+        self.delete_attempts: list[tuple[str | None, str | None]] = []
         super().__init__(("127.0.0.1", 0), JiraHandler)
 
 
@@ -36,6 +38,7 @@ class JiraHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+        query = parse_qs(urlsplit(self.path).query)
         self.jira_server.request_log.append(self.path)
         cookie = self.headers.get("Cookie")
         auth = self.headers.get("Authorization")
@@ -87,13 +90,17 @@ class JiraHandler(BaseHTTPRequestHandler):
                 },
             )
         if path.endswith("/search") and self.jira_server.scenario == "search_cache":
+            start_at = int(query.get("startAt", ["0"])[0])
+            issue_number = start_at + 1
             return self._json(
                 200,
                 {
-                    "total": 1,
+                    "startAt": start_at,
+                    "maxResults": int(query.get("maxResults", ["10"])[0]),
+                    "total": 26,
                     "issues": [
                         {
-                            "key": "TEAM-1",
+                            "key": f"TEAM-{issue_number}",
                             "fields": {
                                 "summary": "Cacheable issue",
                                 "description": "Local buffer search target",
@@ -101,6 +108,100 @@ class JiraHandler(BaseHTTPRequestHandler):
                             },
                         }
                     ],
+                },
+            )
+        if path.endswith("/issue/TEAM-1/worklog") and self.jira_server.scenario == "extended_read_tools":
+            start_at = int(query.get("startAt", ["0"])[0])
+            return self._json(
+                200,
+                {
+                    "startAt": start_at,
+                    "maxResults": int(query.get("maxResults", ["20"])[0]),
+                    "total": 2,
+                    "worklogs": [] if start_at >= 2 else [{"id": "501", "timeSpentSeconds": 3600}],
+                },
+            )
+        if path.endswith("/issue/TEAM-1/changelog") and self.jira_server.scenario == "extended_read_tools":
+            start_at = int(query.get("startAt", ["0"])[0])
+            return self._json(
+                200,
+                {
+                    "startAt": start_at,
+                    "maxResults": int(query.get("maxResults", ["20"])[0]),
+                    "total": 1,
+                    "isLast": True,
+                    "values": [] if start_at >= 1 else [{"id": "601", "items": [{"field": "status"}]}],
+                },
+            )
+        if path.endswith("/issue/TEAM-1/changelog") and self.jira_server.scenario == "changelog_expand_fallback":
+            return self._json(404, {"errorMessages": ["not found"]})
+        if path.endswith("/field") and self.jira_server.scenario == "extended_read_tools":
+            return self._json_list(
+                200,
+                [
+                    {"id": "summary", "name": "Summary", "custom": False, "clauseNames": ["summary"]},
+                    {
+                        "id": "customfield_10008",
+                        "name": "Epic Link",
+                        "custom": True,
+                        "clauseNames": ["Epic Link", "cf[10008]"],
+                    },
+                ],
+            )
+        if path.endswith("/issue/TEAM-1/editmeta") and self.jira_server.scenario == "extended_read_tools":
+            return self._json(
+                200,
+                {
+                    "fields": {
+                        "summary": {"required": True, "name": "Summary"},
+                        "customfield_10008": {
+                            "required": False,
+                            "name": "Epic Link",
+                            "allowedValues": [{"key": "TEAM-10"}],
+                        },
+                    }
+                },
+            )
+        if path.endswith("/project/TEAM") and self.jira_server.scenario == "extended_read_tools":
+            return self._json(200, {"id": "10000", "key": "TEAM", "name": "Team Project"})
+        if path.endswith("/board") and self.jira_server.scenario == "extended_read_tools":
+            return self._json(
+                200,
+                {
+                    "startAt": int(query.get("startAt", ["0"])[0]),
+                    "maxResults": int(query.get("maxResults", ["20"])[0]),
+                    "total": 1,
+                    "isLast": True,
+                    "values": [{"id": 865, "name": "TEAM board", "type": "scrum"}],
+                },
+            )
+        if path.endswith("/board/865/configuration") and self.jira_server.scenario == "extended_read_tools":
+            return self._json(
+                200,
+                {"id": 865, "name": "TEAM board", "filter": {"id": "20001", "self": "filter/20001"}},
+            )
+        if path.endswith("/issue/TEAM-1") and self.jira_server.scenario in {
+            "delete_attachment",
+            "delete_attachment_missing",
+            "delete_attachment_moved_issue",
+            "delete_attachment_forbidden",
+        }:
+            attachments = []
+            if self.jira_server.scenario != "delete_attachment_missing":
+                attachments = [{"id": "20001", "filename": "obsolete.sql"}]
+            issue_key = "OTHER-1" if self.jira_server.scenario == "delete_attachment_moved_issue" else "TEAM-1"
+            return self._json(200, {"key": issue_key, "fields": {"attachment": attachments}})
+        if path.endswith("/issue/TEAM-1") and self.jira_server.scenario == "changelog_expand_fallback":
+            return self._json(
+                200,
+                {
+                    "key": "TEAM-1",
+                    "changelog": {
+                        "startAt": 0,
+                        "maxResults": 20,
+                        "total": 1,
+                        "histories": [{"id": "602", "items": [{"field": "status"}]}],
+                    },
                 },
             )
         if path.endswith("/issueLink/12345") and self.jira_server.scenario == "delete_issue_link":
@@ -261,6 +362,10 @@ class JiraHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+        self.jira_server.request_log.append(self.path)
+        self.jira_server.delete_attempts.append(
+            (self.headers.get("Cookie"), self.headers.get("Authorization"))
+        )
         if path.endswith("/issue/TEAM-1/comment/123") and self.jira_server.scenario == "delete_comment":
             self.jira_server.last_deleted_path = path
             self.send_response(204)
@@ -271,6 +376,19 @@ class JiraHandler(BaseHTTPRequestHandler):
             self.send_response(204)
             self.end_headers()
             return
+        if path.endswith("/attachment/20001") and self.jira_server.scenario == "delete_attachment":
+            self.jira_server.last_deleted_path = path
+            self.send_response(204)
+            self.end_headers()
+            return
+        if path.endswith("/attachment/20001") and self.jira_server.scenario == "delete_attachment_forbidden":
+            if self.headers.get("Cookie") == "JSESSIONID=bad-cookie":
+                return self._json(403, {"errorMessages": ["delete attachment forbidden"]})
+            if self.headers.get("Authorization") == self.jira_server.basic_header:
+                self.jira_server.last_deleted_path = path
+                self.send_response(204)
+                self.end_headers()
+                return
 
         return self._json(404, {"errorMessages": ["not found"]})
 
@@ -312,6 +430,14 @@ class JiraHandler(BaseHTTPRequestHandler):
         if headers:
             for key, value in headers.items():
                 self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json_list(self, status: int, payload: list[dict]) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
@@ -530,6 +656,149 @@ class JiraClientTests(unittest.TestCase):
             self.assertEqual(local["issues"][0]["key"], "TEAM-1")
             self.assertEqual(sum(1 for path in server.request_log if path.startswith("/rest/api/2/search?")), 1)
 
+    def test_search_issues_keeps_cache_pages_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("search_cache") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+                enable_cache=True,
+                cache_path=str(Path(tmpdir) / "jira_cache.json"),
+            )
+            client = JiraClient(settings, JiraRuntimeAuthState(settings))
+
+            first_page = client.search_issues(jql="project = TEAM", fields=["summary"], limit=25)
+            second_page = client.search_issues(jql="project = TEAM", fields=["summary"], limit=25, start_at=25)
+            second_page_cached = client.search_issues(
+                jql="project = TEAM",
+                fields=["summary"],
+                limit=25,
+                start_at=25,
+            )
+
+            self.assertEqual(first_page["issues"][0]["key"], "TEAM-1")
+            self.assertEqual(second_page["issues"][0]["key"], "TEAM-26")
+            self.assertEqual(second_page["start_at"], 25)
+            self.assertTrue(second_page["is_last"])
+            self.assertTrue(second_page_cached["cache"]["hit"])
+            requests = [path for path in server.request_log if path.startswith("/rest/api/2/search?")]
+            self.assertEqual(len(requests), 2)
+            self.assertTrue(any("startAt=25" in path for path in requests))
+
+    def test_list_issue_worklogs_returns_page_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("extended_read_tools") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            client = JiraClient(settings, JiraRuntimeAuthState(settings))
+
+            result = client.list_issue_worklogs(issue_key="TEAM-1", limit=1, start_at=1)
+
+            self.assertEqual(result["count"], 1)
+            self.assertEqual(result["total"], 2)
+            self.assertEqual(result["start_at"], 1)
+            self.assertTrue(result["is_last"])
+            self.assertEqual(result["worklogs"][0]["id"], "501")
+            self.assertIn("startAt=1&maxResults=1", server.request_log[-1])
+
+            empty = client.list_issue_worklogs(issue_key="TEAM-1", limit=10, start_at=2)
+            self.assertEqual(empty["count"], 0)
+            self.assertTrue(empty["is_last"])
+
+    def test_get_issue_changelog_normalizes_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("extended_read_tools") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            client = JiraClient(settings, JiraRuntimeAuthState(settings))
+
+            result = client.get_issue_changelog(issue_key="TEAM-1", limit=10, start_at=0)
+
+            self.assertEqual(result["count"], 1)
+            self.assertTrue(result["is_last"])
+            self.assertEqual(result["source"], "endpoint")
+            self.assertEqual(result["histories"][0]["id"], "601")
+
+            empty = client.get_issue_changelog(issue_key="TEAM-1", limit=10, start_at=1)
+            self.assertEqual(empty["count"], 0)
+            self.assertTrue(empty["is_last"])
+
+    def test_get_issue_changelog_falls_back_to_issue_expansion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("changelog_expand_fallback") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            client = JiraClient(settings, JiraRuntimeAuthState(settings))
+
+            result = client.get_issue_changelog(issue_key="TEAM-1", limit=20, start_at=0)
+
+            self.assertEqual(result["source"], "issue_expand")
+            self.assertEqual(result["histories"][0]["id"], "602")
+            self.assertTrue(any("fields=%2Anone&expand=changelog" in path for path in server.request_log))
+
+            with self.assertRaisesRegex(ValueError, "only the first changelog page"):
+                client.get_issue_changelog(issue_key="TEAM-1", limit=20, start_at=1)
+
+    def test_list_fields_filters_query_and_custom_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("extended_read_tools") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            client = JiraClient(settings, JiraRuntimeAuthState(settings))
+
+            result = client.list_fields(query="epic", custom_only=True)
+
+            self.assertEqual(result["count"], 1)
+            self.assertEqual(result["fields"][0]["id"], "customfield_10008")
+
+    def test_get_issue_edit_metadata_filters_field_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("extended_read_tools") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            client = JiraClient(settings, JiraRuntimeAuthState(settings))
+
+            result = client.get_issue_edit_metadata(issue_key="TEAM-1", field_ids=["customfield_10008"])
+            all_fields = client.get_issue_edit_metadata(issue_key="TEAM-1")
+            missing = client.get_issue_edit_metadata(issue_key="TEAM-1", field_ids=["customfield_99999"])
+
+            self.assertEqual(result["count"], 1)
+            self.assertEqual(list(result["fields"]), ["customfield_10008"])
+            self.assertEqual(result["fields"]["customfield_10008"]["allowedValues"][0]["key"], "TEAM-10")
+            self.assertEqual(all_fields["count"], 2)
+            self.assertEqual(missing["fields"], {})
+
+    def test_get_project_passes_expand(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("extended_read_tools") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            client = JiraClient(settings, JiraRuntimeAuthState(settings))
+
+            result = client.get_project(project_key="TEAM", expand=["description", "lead"])
+
+            self.assertEqual(result["project"]["name"], "Team Project")
+            self.assertIn("expand=description%2Clead", server.request_log[-1])
+
     def test_create_issue_posts_expected_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("create_issue") as server:
             settings = make_settings(
@@ -743,6 +1012,47 @@ class JiraClientTests(unittest.TestCase):
             self.assertEqual(result["count"], 1)
             self.assertEqual(result["sprints"][0]["id"], 456)
 
+    def test_list_boards_and_get_configuration_use_agile_endpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("extended_read_tools") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            client = JiraClient(settings, JiraRuntimeAuthState(settings))
+
+            boards = client.list_boards(
+                project_key_or_id="TEAM",
+                name="TEAM board",
+                board_type="scrum",
+                limit=10,
+                start_at=0,
+            )
+            configuration = client.get_board_configuration(board_id=865)
+            unfiltered = client.list_boards(
+                project_key_or_id=None,
+                name=None,
+                board_type=None,
+                limit=10,
+                start_at=0,
+            )
+
+            self.assertEqual(boards["boards"][0]["id"], 865)
+            self.assertTrue(boards["is_last"])
+            self.assertEqual(configuration["configuration"]["filter"]["id"], "20001")
+            self.assertEqual(unfiltered["count"], 1)
+            board_request = next(path for path in server.request_log if path.startswith("/rest/agile/1.0/board?"))
+            self.assertIn("projectKeyOrId=TEAM", board_request)
+            self.assertIn("name=TEAM+board", board_request)
+            self.assertIn("type=scrum", board_request)
+            unfiltered_request = [
+                path for path in server.request_log if path.startswith("/rest/agile/1.0/board?")
+            ][-1]
+            self.assertNotIn("projectKeyOrId", unfiltered_request)
+            self.assertNotIn("name=", unfiltered_request)
+            self.assertNotIn("type=", unfiltered_request)
+
     def test_create_sprint_posts_expected_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("sprint_manage") as server:
             settings = make_settings(
@@ -924,6 +1234,68 @@ class JiraClientTests(unittest.TestCase):
             assert server.last_uploaded_file is not None
             self.assertGreater(int(server.last_uploaded_file["size"]), 0)
             self.assertIn('filename="test.sql"', str(server.last_uploaded_file["body"]))
+
+    def test_delete_attachment_verifies_issue_before_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("delete_attachment") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            client = JiraClient(settings, JiraRuntimeAuthState(settings))
+
+            with unittest.mock.patch.object(client, "_invalidate_issue_cache") as invalidate:
+                result = client.delete_attachment(issue_key="TEAM-1", attachment_id="20001")
+
+            self.assertEqual(result["filename"], "obsolete.sql")
+            self.assertEqual(server.last_deleted_path, "/rest/api/2/attachment/20001")
+            self.assertTrue(any("/issue/TEAM-1?fields=attachment" in path for path in server.request_log))
+            invalidate.assert_called_once_with("TEAM-1")
+
+    def test_delete_attachment_rejects_attachment_from_another_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("delete_attachment_missing") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            client = JiraClient(settings, JiraRuntimeAuthState(settings))
+
+            with self.assertRaisesRegex(ValueError, "not found in issue"):
+                client.delete_attachment(issue_key="TEAM-1", attachment_id="20001")
+
+            self.assertIsNone(server.last_deleted_path)
+
+    def test_delete_attachment_rejects_issue_key_resolution_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("delete_attachment_moved_issue") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+                auth_mode="basic",
+                cookie=None,
+            )
+            client = JiraClient(settings, JiraRuntimeAuthState(settings))
+
+            with self.assertRaisesRegex(ValueError, "resolved to 'OTHER-1'"):
+                client.delete_attachment(issue_key="TEAM-1", attachment_id="20001")
+
+            self.assertIsNone(server.last_deleted_path)
+
+    def test_delete_attachment_does_not_escalate_on_forbidden(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("delete_attachment_forbidden") as server:
+            settings = make_settings(
+                f"http://127.0.0.1:{server.server_address[1]}",
+                str(Path(tmpdir) / "jira_cookie.json"),
+            )
+            client = JiraClient(settings, JiraRuntimeAuthState(settings))
+
+            with self.assertRaisesRegex(RuntimeError, "403 DELETE /attachment/20001"):
+                client.delete_attachment(issue_key="TEAM-1", attachment_id="20001")
+
+            self.assertEqual(server.delete_attempts, [("JSESSIONID=bad-cookie", None)])
+            self.assertIsNone(server.last_deleted_path)
 
     def test_download_attachment_by_id_writes_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, JiraServerContext("download_attachment") as server:
