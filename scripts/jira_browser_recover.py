@@ -42,6 +42,7 @@ def main() -> int:
             context = playwright.chromium.launch_persistent_context(
                 user_data_dir=profile_dir,
                 headless=not args.headful,
+                ignore_https_errors=True,
             )
             page = context.new_page()
             page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
